@@ -1,0 +1,4 @@
+/build
+
+# jniLibs staged by build_android_sfm_full.sh
+src/main/jniLibs/
