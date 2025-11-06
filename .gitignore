@@ -1,0 +1,30 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+# === build_android_sfm_full.sh artifacts ===
+# Intermediate build trees
+/android-build/
+/android-install/
+
+# Third-party sources cloned by the script
+/third_party/
+
+# Staged outputs and logs
+/out/
+
+# Optional: jniLibs copied into modules
+# (module-level .gitignore also updated for app)
+/app/src/main/jniLibs/
+/sfmfull/src/main/jniLibs/
