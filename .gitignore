@@ -8,11 +8,13 @@
 /.idea/navEditor.xml
 /.idea/assetWizardSettings.xml
 .DS_Store
+/.idea/
 /build
 /captures
 .externalNativeBuild
 .cxx
 local.properties
+.kotlin/
 # === build_android_sfm_full.sh artifacts ===
 # Intermediate build trees
 /android-build/
