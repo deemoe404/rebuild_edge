@@ -5,7 +5,7 @@
 #          for Android arm64-v8a, then stage .so/.a and headers for use
 #          in an Android Library module (AAR) or app.
 # Host: macOS (Apple Silicon or Intel)
-# Toolchain: Android NDK r26.1+ (prefers 26.1.10909125)
+# Toolchain: Android NDK r27.0+ (prefers 27.0.12077973)
 #
 # Usage:
 #   chmod +x ./build_android_sfm_full.sh
