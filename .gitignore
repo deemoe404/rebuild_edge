@@ -30,3 +30,5 @@ local.properties
 # (module-level .gitignore also updated for app)
 /app/src/main/jniLibs/
 /sfmfull/src/main/jniLibs/
+
+/logs/
