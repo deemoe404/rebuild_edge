@@ -831,17 +831,37 @@ fi
 TOP_CMAKE="$COLMAP_SRC/CMakeLists.txt"
 cp -f "$TOP_CMAKE" "$TOP_CMAKE.bak"
 awk '
-  BEGIN{printed_guard=0}
+  BEGIN{
+    printed_guard=0;
+    in_export_set=0;
+  }
   {
-    print $0
-    # 在第一次出现 set(COLMAP_EXPORT_LIBS 开头的行之后、并且把 colmap_exe 从原清单移除后，插入 if(TARGET) 守卫
-    if (!printed_guard && $0 ~ /^set\(COLMAP_EXPORT_LIBS/) {
-      # 后续由人工把 colmap_exe 从该 set(...) 静态清单里删掉；这里仅插 guard
+    line=$0
+
+    # Detect start of COLMAP_EXPORT_LIBS set(...)
+    if (line ~ /^set\(COLMAP_EXPORT_LIBS/) {
+      in_export_set=1
+    }
+
+    # While inside that set(...), drop the colmap_exe entry (any spacing)
+    if (in_export_set) {
+      if (line ~ /^[ \t]*colmap_exe[ \t]*$/) {
+        next
+      }
+      # End of the set(...) block
+      if (line ~ /\)/) {
+        in_export_set=0
+      }
+    }
+
+    print line
+
+    # Mark that we should append the guard once (we do it in END)
+    if (!printed_guard && line ~ /^set\(COLMAP_EXPORT_LIBS/) {
       printed_guard=1
     }
   }
   END{
-    # 在文件末尾补一个追加（更稳：你也可选择紧跟在 set(...) 之后插入）
     print ""
     print "# --- Added by build script: export CLI only if it exists ---"
     print "if (TARGET colmap_exe)"
