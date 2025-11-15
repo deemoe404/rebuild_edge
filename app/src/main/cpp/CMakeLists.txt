@@ -58,6 +58,8 @@ target_sources(sfm_native PRIVATE
     ${COLMAP_SOURCE_DIR}/colmap/exe/feature.cc
     ${COLMAP_SOURCE_DIR}/colmap/exe/sfm.cc
     ${COLMAP_SOURCE_DIR}/colmap/exe/model.cc
+    ${COLMAP_SOURCE_DIR}/colmap/exe/image.cc
+    ${COLMAP_SOURCE_DIR}/colmap/exe/mvs.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/freeimage_stub.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/graph_cut_stub.cpp
 )

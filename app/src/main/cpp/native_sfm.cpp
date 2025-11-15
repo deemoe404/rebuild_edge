@@ -38,6 +38,8 @@
 #include "colmap/exe/feature.h"
 #include "colmap/exe/sfm.h"
 #include "colmap/exe/model.h"
+#include "colmap/exe/image.h"
+#include "colmap/exe/mvs.h"
 #include "colmap/util/logging.h"
 
 #include <sys/stat.h>
@@ -167,6 +169,26 @@ std::string pick_sparse_model_dir(const std::string& base) {
     }
     closedir(dir);
     return found;
+}
+
+std::string pick_sparse_model_for_dense(const std::string& runDir) {
+    const std::string aligned = runDir + "/sparse_aligned";
+    if (dir_exists(aligned)) {
+        if (file_exists(aligned + "/images.bin") && file_exists(aligned + "/points3D.bin")) {
+            return aligned;
+        }
+        const std::string nested = pick_sparse_model_dir(aligned);
+        if (!nested.empty()) return nested;
+    }
+    const std::string sparse = runDir + "/sparse";
+    if (dir_exists(sparse)) {
+        const std::string nested = pick_sparse_model_dir(sparse);
+        if (!nested.empty()) return nested;
+        if (file_exists(sparse + "/images.bin") && file_exists(sparse + "/points3D.bin")) {
+            return sparse;
+        }
+    }
+    return "";
 }
 
 using StageFunc = int(*)(int, char**);
@@ -2119,6 +2141,184 @@ Java_com_example_rebuild_1edge_SfmNative_runColmapSfm(
         logE(result);
     } else {
         result = "ERR: Missing points3D.bin under " + sparseModelDir + ". Log: " + logPath;
+        logE(result);
+    }
+
+    write_log_to_file(logPath);
+    return env->NewStringUTF(result.c_str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_example_rebuild_1edge_SfmNative_runColmapPatchMatch(
+        JNIEnv* env, jclass /*clazz*/, jstring jDatasetPath, jstring jRunDir,
+        jstring jWorkspaceDir, jstring jLogPath, jint jMaxImageSize,
+        jboolean jGeomConsistency, jdouble jDepthMin, jdouble jDepthMax,
+        jint jNumIterations, jint jWindowRadius, jint jNumSamples,
+        jint jCacheSize, jint jThreads, jdouble jFusionMaxReprojError,
+        jdouble jFusionMaxDepthError, jdouble jFusionMaxNormalError,
+        jint jFusionMinNumConsistent) {
+    std::ostringstream log;
+    size_t lastFlushedLen = 0;
+    std::string datasetPath = JStringToString(env, jDatasetPath);
+    std::string runDir = JStringToString(env, jRunDir);
+    std::string workspaceDir = JStringToString(env, jWorkspaceDir);
+    std::string logPath = JStringToString(env, jLogPath);
+
+    auto write_log_to_file = [&](const std::string& path) {
+        if (path.empty()) return;
+        const std::string current = log.str();
+        if (current.size() <= lastFlushedLen) return;
+        std::ofstream ofs(path, std::ios::app);
+        if (ofs) {
+            ofs.write(current.data() + lastFlushedLen,
+                      static_cast<std::streamsize>(current.size() - lastFlushedLen));
+            lastFlushedLen = current.size();
+        }
+    };
+    auto flush = [&]() { write_log_to_file(logPath); };
+    auto logI = [&](const std::string& msg) {
+        ALOGI("%s", msg.c_str());
+        log << "[I] " << msg << "\n";
+        flush();
+    };
+    auto logE = [&](const std::string& msg) {
+        ALOGE("%s", msg.c_str());
+        log << "[E] " << msg << "\n";
+        flush();
+    };
+
+    const int maxImageSize = std::max(256, static_cast<int>(jMaxImageSize));
+    const bool geomConsistency = (jGeomConsistency == JNI_TRUE);
+    const double depthMin = jDepthMin;
+    const double depthMax = jDepthMax;
+    const int numIterations = std::max(1, static_cast<int>(jNumIterations));
+    const int windowRadius = std::max(1, static_cast<int>(jWindowRadius));
+    const int numSamples = std::max(1, static_cast<int>(jNumSamples));
+    const double cacheSize = std::max(1.0, static_cast<double>(jCacheSize));
+    const int threads = std::max(1, static_cast<int>(jThreads));
+    const double fusionMaxReprojError = jFusionMaxReprojError > 0.0 ? jFusionMaxReprojError : 4.0;
+    const double fusionMaxDepthError = jFusionMaxDepthError > 0.0 ? jFusionMaxDepthError : 0.02;
+    const double fusionMaxNormalError = jFusionMaxNormalError > 0.0 ? jFusionMaxNormalError : 20.0;
+    const int fusionMinConsistent = std::max(1, static_cast<int>(jFusionMinNumConsistent));
+
+    if (datasetPath.empty() || !dir_exists(datasetPath)) {
+        std::string out = "Error: dataset path invalid -> " + datasetPath;
+        logE(out);
+        return env->NewStringUTF(out.c_str());
+    }
+    if (runDir.empty() || !dir_exists(runDir)) {
+        std::string out = "Error: run dir missing -> " + runDir;
+        logE(out);
+        return env->NewStringUTF(out.c_str());
+    }
+    if (workspaceDir.empty()) {
+        std::string out = "Error: workspace dir empty";
+        logE(out);
+        return env->NewStringUTF(out.c_str());
+    }
+    if (!mkdir_p(workspaceDir)) {
+        std::string out = "Error: cannot create workspace dir -> " + workspaceDir;
+        logE(out);
+        return env->NewStringUTF(out.c_str());
+    }
+    if (!logPath.empty()) {
+        std::ofstream ofs(logPath, std::ios::trunc);
+        if (!ofs) {
+            ALOGE("Failed to open log file: %s", logPath.c_str());
+        }
+    }
+
+    ensure_glog_initialized();
+    FileLogSink* sink = GetOrCreateFileLogSink();
+    if (sink) {
+        sink->set_path(logPath);
+    }
+
+    std::string sparseModelDir = pick_sparse_model_for_dense(runDir);
+    if (sparseModelDir.empty()) {
+        std::string out = "Error: 未找到稀疏模型目录 (sparse 或 sparse_aligned)";
+        logE(out);
+        return env->NewStringUTF(out.c_str());
+    }
+    logI("PatchMatch 输入模型: " + sparseModelDir);
+    logI("PatchMatch 工作目录: " + workspaceDir);
+
+    bool pipelineOk = true;
+    std::string failStage;
+
+    std::vector<std::string> undistArgs = {
+            "colmap",
+            "--image_path", datasetPath,
+            "--input_path", sparseModelDir,
+            "--output_path", workspaceDir,
+            "--output_type", "COLMAP",
+            "--max_image_size", std::to_string(maxImageSize)
+    };
+    if (!run_colmap_stage("图像去畸变 (image_undistorter)",
+                          &colmap::RunImageUndistorter,
+                          undistArgs, log, flush, logI, logE)) {
+        pipelineOk = false;
+        failStage = "image_undistorter";
+    }
+
+    std::vector<std::string> pmArgs = {
+            "colmap",
+            "--workspace_path", workspaceDir,
+            "--workspace_format", "COLMAP",
+            "--PatchMatchStereo.gpu_index", "-1",
+            "--PatchMatchStereo.max_image_size", std::to_string(maxImageSize),
+            "--PatchMatchStereo.geom_consistency", geomConsistency ? "true" : "false",
+            "--PatchMatchStereo.num_iterations", std::to_string(numIterations),
+            "--PatchMatchStereo.window_radius", std::to_string(windowRadius),
+            "--PatchMatchStereo.num_samples", std::to_string(numSamples),
+            "--PatchMatchStereo.cache_size", std::to_string(cacheSize),
+            "--PatchMatchStereo.num_threads", std::to_string(threads),
+            "--PatchMatchStereo.filter_min_num_consistent", std::to_string(fusionMinConsistent),
+            "--PatchMatchStereo.filter", "1"
+    };
+    if (depthMin > 0.0) {
+        pmArgs.push_back("--PatchMatchStereo.depth_min");
+        pmArgs.push_back(std::to_string(depthMin));
+    }
+    if (depthMax > 0.0) {
+        pmArgs.push_back("--PatchMatchStereo.depth_max");
+        pmArgs.push_back(std::to_string(depthMax));
+    }
+    if (pipelineOk && !run_colmap_stage("PatchMatch 立体匹配 (patch_match_stereo)",
+                                        &colmap::RunPatchMatchStereo,
+                                        pmArgs, log, flush, logI, logE)) {
+        pipelineOk = false;
+        failStage = "patch_match_stereo";
+    }
+
+    const std::string fusedPath = workspaceDir + "/fused.ply";
+    std::vector<std::string> fusionArgs = {
+            "colmap",
+            "--workspace_path", workspaceDir,
+            "--workspace_format", "COLMAP",
+            "--input_type", geomConsistency ? "geometric" : "photometric",
+            "--output_path", fusedPath,
+            "--output_type", "PLY",
+            "--StereoFusion.max_reproj_error", std::to_string(fusionMaxReprojError),
+            "--StereoFusion.max_depth_error", std::to_string(fusionMaxDepthError),
+            "--StereoFusion.max_normal_error", std::to_string(fusionMaxNormalError),
+            "--StereoFusion.min_num_pixels", std::to_string(fusionMinConsistent),
+            "--StereoFusion.max_image_size", std::to_string(maxImageSize),
+            "--StereoFusion.num_threads", std::to_string(threads)
+    };
+    if (pipelineOk && !run_colmap_stage("稠密融合 (stereo_fusion)",
+                                        &colmap::RunStereoFuser,
+                                        fusionArgs, log, flush, logI, logE)) {
+        pipelineOk = false;
+        failStage = "stereo_fusion";
+    }
+
+    std::string result;
+    if (pipelineOk && file_exists(fusedPath)) {
+        result = "OK: PatchMatch MVS 输出 " + fusedPath;
+        logI(result);
+    } else {
+        result = "ERR: PatchMatch pipeline 失败 (" + failStage + ")";
         logE(result);
     }
 

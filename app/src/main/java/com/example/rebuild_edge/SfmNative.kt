@@ -51,4 +51,24 @@ object SfmNative {
         alignmentType: String,
         alignmentMaxError: Double
     ): String
+
+    external fun runColmapPatchMatch(
+        datasetPath: String,
+        runDir: String,
+        workspaceDir: String,
+        logPath: String,
+        maxImageSize: Int,
+        geomConsistency: Boolean,
+        depthMin: Double,
+        depthMax: Double,
+        numIterations: Int,
+        windowRadius: Int,
+        numSamples: Int,
+        cacheSize: Int,
+        threads: Int,
+        fusionMaxReprojError: Double,
+        fusionMaxDepthError: Double,
+        fusionMaxNormalError: Double,
+        fusionMinNumConsistent: Int
+    ): String
 }
