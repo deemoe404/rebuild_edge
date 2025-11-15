@@ -38,6 +38,14 @@ object TaskStore {
         runCatching { f.writeText(arr.toString()) }
     }
 
+    fun update(context: Context, record: TaskRecord) {
+        val f = file(context)
+        val arr = JSONArray()
+        val updated = loadAll(context).map { if (it.id == record.id) record else it }
+        updated.forEach { arr.put(toJson(it)) }
+        runCatching { f.writeText(arr.toString()) }
+    }
+
     fun newId(): String = UUID.randomUUID().toString()
 
     private fun toJson(t: TaskRecord): JSONObject {

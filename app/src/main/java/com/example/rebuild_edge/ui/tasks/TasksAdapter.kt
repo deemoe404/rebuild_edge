@@ -37,6 +37,13 @@ class TasksAdapter(
         }
         holder.binding.txtTitle.text = (if (item.success) "✅ " else "⚠️ ") + "$typeLabel @ $ts"
         val extra = item.extraJson.takeIf { it.isNotBlank() }?.let { runCatching { JSONObject(it) }.getOrNull() }
+        val badges = buildBadges(item, extra)
+        if (badges.isEmpty()) {
+            holder.binding.txtBadges.visibility = View.GONE
+        } else {
+            holder.binding.txtBadges.visibility = View.VISIBLE
+            holder.binding.txtBadges.text = badges.joinToString(" · ")
+        }
         val detail = if (item.taskType == TaskRecord.TYPE_COLMAP) {
             val camera = extra?.optString("cameraModel") ?: "OPENCV"
             val overlap = extra?.optInt("sequentialOverlap", item.mode) ?: item.mode
@@ -48,5 +55,32 @@ class TasksAdapter(
         holder.binding.txtSubtitle.text =
             "用时 ${mins}分${secs}秒 · 输入${item.inputCount}张 · $detail"
         holder.binding.root.setOnClickListener { onClick(item) }
+    }
+
+    private fun buildBadges(task: TaskRecord, extra: JSONObject?): List<String> {
+        val badges = mutableListOf<String>()
+        val tagsArray = extra?.optJSONArray("tags")
+        if (tagsArray != null) {
+            for (i in 0 until tagsArray.length()) {
+                when (val tag = tagsArray.optString(i)) {
+                    "sfm" -> badges.addOnce("SFM")
+                    "sparse_depth" -> badges.addOnce("稀疏深度")
+                    else -> if (tag.isNotBlank()) badges.addOnce(tag)
+                }
+            }
+        }
+        if (extra?.has("sparseDepth") == true) {
+            badges.addOnce("稀疏深度")
+        }
+        if (badges.isEmpty()) {
+            if (task.taskType == TaskRecord.TYPE_COLMAP) badges.add("COLMAP") else badges.add("SFM")
+        }
+        return badges
+    }
+
+    private fun MutableList<String>.addOnce(label: String) {
+        if (!this.any { it == label }) {
+            add(label)
+        }
     }
 }

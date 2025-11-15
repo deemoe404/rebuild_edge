@@ -2,6 +2,7 @@ package com.example.rebuild_edge.ui.gallery
 
 import android.content.Intent
 import android.net.Uri
+import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.os.Process
 import android.os.SystemClock
@@ -25,6 +26,9 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
+import kotlin.math.roundToInt
+import org.json.JSONArray
+import org.json.JSONObject
 
 class GalleryFragment : Fragment() {
 
@@ -117,17 +121,22 @@ class GalleryFragment : Fragment() {
 
             val align = binding.chkAlign.isChecked
             Log.d(TAG, "Selected ${imagePaths.size} images, outDir=${outDir.absolutePath}, alignGps=$align")
+            val maxLongEdge = runCatching { binding.editMaxLongEdge.text.toString().trim().toInt() }
+                .getOrDefault(2000)
+                .coerceAtLeast(0)
+            val mode = binding.spinnerMode.selectedItemPosition // 0=default,1=lite,2=kNN
+            val stride = runCatching { binding.editStride.text.toString().trim().toInt() }.getOrDefault(1).coerceAtLeast(1)
+            val window = runCatching { binding.editWindow.text.toString().trim().toInt() }.getOrDefault(0).coerceAtLeast(0)
+            val kNeighbors = runCatching { binding.editKNeighbors.text.toString().trim().toInt() }.getOrDefault(2).coerceAtLeast(1)
+            val sourceSize = imagePaths.firstOrNull()?.let { decodeImageSize(it) }
+            val scale = computeDownscaleFactor(sourceSize, maxLongEdge)
+            val scaledWidth = sourceSize?.first?.let { (it * scale).roundToInt().coerceAtLeast(1) }
+            val scaledHeight = sourceSize?.second?.let { (it * scale).roundToInt().coerceAtLeast(1) }
+
             val result = if (imagePaths.size >= 3) {
                 try {
                     appendKotlinLog("Starting SFM (alignGps=$align) ...\n")
                     startTailingLog(logFile)
-                    val maxLongEdge = runCatching { binding.editMaxLongEdge.text.toString().trim().toInt() }
-                        .getOrDefault(2000)
-                        .coerceAtLeast(0)
-                    val mode = binding.spinnerMode.selectedItemPosition // 0=default,1=lite,2=kNN
-                    val stride = runCatching { binding.editStride.text.toString().trim().toInt() }.getOrDefault(1).coerceAtLeast(1)
-                    val window = runCatching { binding.editWindow.text.toString().trim().toInt() }.getOrDefault(0).coerceAtLeast(0)
-                    val kNeighbors = runCatching { binding.editKNeighbors.text.toString().trim().toInt() }.getOrDefault(2).coerceAtLeast(1)
                     appendKotlinLog("Max long edge: $maxLongEdge px, Mode=$mode, stride=$stride, window=$window, k=$kNeighbors\n")
                     SfmNative.runSfm(
                         imagePaths.toTypedArray(),
@@ -162,13 +171,20 @@ class GalleryFragment : Fragment() {
                     logPath = logFile.absolutePath,
                     inputCount = imagePaths.size,
                     alignUsingGps = align,
-                    maxLongEdge = runCatching { binding.editMaxLongEdge.text.toString().trim().toInt() }.getOrDefault(2000).coerceAtLeast(0),
-                    mode = binding.spinnerMode.selectedItemPosition,
-                    stride = runCatching { binding.editStride.text.toString().trim().toInt() }.getOrDefault(1).coerceAtLeast(1),
-                    window = runCatching { binding.editWindow.text.toString().trim().toInt() }.getOrDefault(0).coerceAtLeast(0),
-                    kNeighbors = runCatching { binding.editKNeighbors.text.toString().trim().toInt() }.getOrDefault(2).coerceAtLeast(1),
+                    maxLongEdge = maxLongEdge,
+                    mode = mode,
+                    stride = stride,
+                    window = window,
+                    kNeighbors = kNeighbors,
                     resultSummary = result.take(5000),
-                    success = ok
+                    success = ok,
+                    extraJson = JSONObject().apply {
+                        put("tags", JSONArray().apply { put("sfm") })
+                        if (scaledWidth != null && scaledHeight != null) {
+                            put("inputWidth", scaledWidth)
+                            put("inputHeight", scaledHeight)
+                        }
+                    }.toString()
                 )
                 com.example.rebuild_edge.data.TaskStore.add(requireContext(), rec)
             }
@@ -237,6 +253,21 @@ class GalleryFragment : Fragment() {
     private fun stopTailingLog() {
         tailJob?.cancel()
         tailJob = null
+    }
+
+    private fun decodeImageSize(path: String?): Pair<Int, Int>? {
+        if (path.isNullOrBlank()) return null
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, opts)
+        return if (opts.outWidth > 0 && opts.outHeight > 0) opts.outWidth to opts.outHeight else null
+    }
+
+    private fun computeDownscaleFactor(size: Pair<Int, Int>?, maxLongEdge: Int): Double {
+        if (size == null || maxLongEdge <= 0) return 1.0
+        val (w, h) = size
+        val longEdge = maxOf(w, h)
+        if (longEdge <= maxLongEdge) return 1.0
+        return maxLongEdge.toDouble() / longEdge.toDouble()
     }
 
     private suspend fun appendKotlinLog(line: String) {

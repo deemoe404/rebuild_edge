@@ -40,20 +40,106 @@
                 android:text="分享全部输出" />
         </LinearLayout>
 
+        <LinearLayout
+            android:id="@+id/groupSparseDepth"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingTop="16dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="稀疏深度工具"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/txtSparseDepthStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textSize="12sp"
+                android:paddingTop="4dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:paddingTop="8dp">
+
+                <EditText
+                    android:id="@+id/editSparseWidth"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:hint="宽度"
+                    android:inputType="number" />
+
+                <View
+                    android:layout_width="8dp"
+                    android:layout_height="0dp" />
+
+                <EditText
+                    android:id="@+id/editSparseHeight"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:hint="高度"
+                    android:inputType="number" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:paddingTop="8dp">
+
+                <Button
+                    android:id="@+id/btnGenerateSparseDepth"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="生成稀疏深度" />
+
+                <ProgressBar
+                    android:id="@+id/progressSparseDepth"
+                    style="?android:attr/progressBarStyleHorizontal"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="12dp"
+                    android:indeterminate="true"
+                    android:max="100"
+                    android:visibility="gone" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/txtSparseDepthProgress"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textSize="12sp"
+                android:textColor="@android:color/darker_gray"
+                android:paddingTop="4dp"
+                android:visibility="gone" />
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/btnViewLog"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="查看日志" />
+
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="日志："
+            android:text="稀疏深度结果"
             android:textStyle="bold"
             android:paddingTop="12dp" />
 
-        <TextView
-            android:id="@+id/txtLog"
+        <LinearLayout
+            android:id="@+id/containerSparseRuns"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:typeface="monospace"
-            android:textSize="12sp"
-            android:textIsSelectable="true" />
+            android:orientation="vertical" />
 
         <TextView
             android:layout_width="match_parent"
@@ -62,11 +148,11 @@
             android:textStyle="bold"
             android:paddingTop="12dp" />
 
-        <androidx.recyclerview.widget.RecyclerView
-            android:id="@+id/recyclerFiles"
+        <LinearLayout
+            android:id="@+id/containerFiles"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content" />
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
 
     </LinearLayout>
 </ScrollView>
-

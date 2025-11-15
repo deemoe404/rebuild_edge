@@ -1,0 +1,253 @@
+package com.example.rebuild_edge.ui.tasks
+
+import android.graphics.Bitmap
+import android.graphics.Color
+import android.os.Bundle
+import android.util.Log
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.Toast
+import androidx.fragment.app.Fragment
+import androidx.lifecycle.lifecycleScope
+import com.example.rebuild_edge.databinding.FragmentTaskSparsePreviewBinding
+import java.io.File
+import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+class TaskSparsePreviewFragment : Fragment() {
+
+    private var _binding: FragmentTaskSparsePreviewBinding? = null
+    private val binding get() = _binding!!
+
+    private var runDir: String? = null
+    private var runId: String? = null
+    private var files: List<File> = emptyList()
+    private var currentIndex = 0
+
+    override fun onCreateView(
+        inflater: LayoutInflater,
+        container: ViewGroup?,
+        savedInstanceState: Bundle?
+    ): View {
+        _binding = FragmentTaskSparsePreviewBinding.inflate(inflater, container, false)
+        runDir = arguments?.getString("runDir")
+        runId = arguments?.getString("runId")
+        setupUi()
+        return binding.root
+    }
+
+    private fun setupUi() {
+        val dir = runDir?.let { File(it) }
+        if (dir == null || !dir.isDirectory) {
+            Toast.makeText(requireContext(), "稀疏深度目录无效", Toast.LENGTH_SHORT).show()
+            binding.txtRunInfo.text = "目录无效"
+            return
+        }
+        files = dir.listFiles { f -> f.isFile && f.name.lowercase(Locale.getDefault()).endsWith(".npy") }?.sortedBy { it.name }
+            ?: emptyList()
+        if (files.isEmpty()) {
+            binding.txtRunInfo.text = "未找到 NPY 文件"
+            return
+        }
+        binding.txtRunInfo.text = "ID=${runId ?: "--"} · ${files.size} 张"
+        binding.btnPrev.setOnClickListener { showFrame(currentIndex - 1) }
+        binding.btnNext.setOnClickListener { showFrame(currentIndex + 1) }
+        showFrame(0)
+    }
+
+    private fun showFrame(index: Int) {
+        if (files.isEmpty()) return
+        val newIndex = index.coerceIn(0, files.lastIndex)
+        currentIndex = newIndex
+        val file = files[newIndex]
+        binding.btnPrev.isEnabled = currentIndex > 0
+        binding.btnNext.isEnabled = currentIndex < files.lastIndex
+        binding.txtFrameInfo.text = "加载 ${file.name} (${newIndex + 1}/${files.size}) ..."
+        binding.progressLoading.visibility = View.VISIBLE
+        binding.imageDepth.resetZoom()
+        viewLifecycleOwner.lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { loadDepthBitmap(file) }
+            }
+            binding.progressLoading.visibility = View.GONE
+            if (result.isSuccess) {
+                val frame = result.getOrThrow()
+                binding.imageDepth.setImageBitmap(frame.bitmap)
+                val stats = frame.stats
+                binding.txtFrameInfo.text = buildString {
+                    append("${file.name} (${currentIndex + 1}/${files.size})\n")
+                    append("分辨率: ${frame.width}x${frame.height} · 有效像素=${stats.validPixels}\n")
+                    append("深度范围: %.3f ~ %.3f".format(Locale.getDefault(), stats.minDepth, stats.maxDepth))
+                }
+            } else {
+                binding.imageDepth.setImageBitmap(null)
+                val err = result.exceptionOrNull()
+                if (err != null) {
+                    Log.e("SparsePreview", "Failed to load ${file.absolutePath}", err)
+                }
+                binding.txtFrameInfo.text = "加载失败 (${file.name}): ${err?.localizedMessage ?: "未知错误"}"
+            }
+        }
+    }
+
+    private fun loadDepthBitmap(file: File): LoadedFrame {
+        val arr = NpyReader.load(file)
+        val width = arr.width
+        val height = arr.height
+        val floats = arr.data
+        var min = Float.MAX_VALUE
+        var max = Float.MIN_VALUE
+        var valid = 0
+        for (value in floats) {
+            if (value.isFinite() && value > 0f) {
+                valid += 1
+                if (value < min) min = value
+                if (value > max) max = value
+            }
+        }
+        if (valid == 0) {
+            min = 0f
+            max = 1f
+        }
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val range = if (max > min) max - min else 1f
+        val pixels = IntArray(width * height)
+        for (i in floats.indices) {
+            val v = floats[i]
+            val norm = if (v.isFinite() && v > 0f) ((v - min) / range).coerceIn(0f, 1f) else 0f
+            val gray = (norm * 255f).toInt().coerceIn(0, 255)
+            pixels[i] = Color.rgb(gray, gray, gray)
+        }
+        bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
+        return LoadedFrame(bitmap, width, height, Stats(valid, min.toDouble(), max.toDouble()))
+    }
+
+    data class LoadedFrame(val bitmap: Bitmap, val width: Int, val height: Int, val stats: Stats)
+    data class Stats(val validPixels: Int, val minDepth: Double, val maxDepth: Double)
+
+    override fun onDestroyView() {
+        super.onDestroyView()
+        _binding = null
+    }
+}
+
+private object NpyReader {
+    data class Result(val width: Int, val height: Int, val data: FloatArray)
+
+    fun load(file: File): Result {
+        RandomAccessFile(file, "r").use { raf ->
+            val magic = ByteArray(6)
+            raf.readFully(magic)
+            if (!magic.contentEquals(byteArrayOf(0x93.toByte(), 'N'.code.toByte(), 'U'.code.toByte(), 'M'.code.toByte(), 'P'.code.toByte(), 'Y'.code.toByte()))) {
+                throw IllegalArgumentException("不是 NPY 文件")
+            }
+            val major = raf.readUnsignedByte()
+            raf.readUnsignedByte() // minor, unused
+            val headerLen = when (major) {
+                1 -> raf.readUnsignedShortLE()
+                2 -> raf.readIntLE()
+                else -> raf.readUnsignedShortLE()
+            }
+            val headerBytes = ByteArray(headerLen)
+            raf.readFully(headerBytes)
+            val header = String(headerBytes)
+            val shapePart = Regex("'shape'\\s*:\\s*\\(([^)]*)\\)").find(header)
+                ?: throw IllegalArgumentException("无法解析 shape: $header")
+            val dims = Regex("\\d+")
+                .findAll(shapePart.groupValues[1])
+                .map { it.value.toInt() }
+                .toList()
+            if (dims.size < 2) throw IllegalArgumentException("NPY 不是二维: ${shapePart.groupValues[1]}")
+            val height = dims[0]
+            val width = dims[1]
+            val total = dims.fold(1L) { acc, d -> acc * d }
+
+            val descr = Regex("'descr'\\s*:\\s*'([^']+)'")
+                .find(header)?.groupValues?.getOrNull(1)
+                ?: "<f4"
+            val fortranOrder = Regex("'fortran_order'\\s*:\\s*(True|False)")
+                .find(header)?.groupValues?.getOrNull(1)?.equals("True", ignoreCase = true) ?: false
+
+            val (byteOrder, typeChar, typeSize) = parseDescr(descr)
+            if (typeChar != 'f') {
+                throw IllegalArgumentException("仅支持浮点 NPY，当前 descr=$descr")
+            }
+            val dataBytes = ByteArray((total * typeSize).toInt())
+            raf.readFully(dataBytes)
+            val buffer = ByteBuffer.wrap(dataBytes).order(byteOrder)
+            val data = FloatArray((width * height))
+            when (typeSize) {
+                4 -> {
+                    val floatBuf = buffer.asFloatBuffer()
+                    val tmp = FloatArray(total.toInt())
+                    floatBuf.get(tmp)
+                    copyWithOrder(tmp, data, width, height, fortranOrder)
+                }
+                8 -> {
+                    val doubleBuf = DoubleArray(total.toInt())
+                    for (i in doubleBuf.indices) {
+                        doubleBuf[i] = buffer.double
+                    }
+                    val tmp = FloatArray(doubleBuf.size) { doubleBuf[it].toFloat() }
+                    copyWithOrder(tmp, data, width, height, fortranOrder)
+                }
+                else -> throw IllegalArgumentException("不支持的 dtype 大小: $typeSize bytes")
+            }
+            return Result(width, height, data)
+        }
+    }
+
+    private fun parseDescr(descr: String): Triple<ByteOrder, Char, Int> {
+        if (descr.length < 3) return Triple(ByteOrder.LITTLE_ENDIAN, 'f', 4)
+        val orderChar = descr[0]
+        val typeChar = descr[1]
+        val size = descr.substring(2).toIntOrNull() ?: 4
+        val byteOrder = when (orderChar) {
+            '<' -> ByteOrder.LITTLE_ENDIAN
+            '>' -> ByteOrder.BIG_ENDIAN
+            else -> ByteOrder.nativeOrder()
+        }
+        return Triple(byteOrder, typeChar, size)
+    }
+
+    private fun copyWithOrder(src: FloatArray, dst: FloatArray, width: Int, height: Int, fortran: Boolean) {
+        if (!fortran) {
+            if (src.size != dst.size) {
+                System.arraycopy(src, 0, dst, 0, minOf(src.size, dst.size))
+            } else {
+                System.arraycopy(src, 0, dst, 0, src.size)
+            }
+            return
+        }
+        var idx = 0
+        for (x in 0 until width) {
+            for (y in 0 until height) {
+                val dstIndex = y * width + x
+                dst[dstIndex] = src[idx]
+                idx += 1
+            }
+        }
+    }
+
+    private fun RandomAccessFile.readUnsignedShortLE(): Int {
+        val b0 = readUnsignedByte()
+        val b1 = readUnsignedByte()
+        return (b1 shl 8) or b0
+    }
+
+    private fun RandomAccessFile.readIntLE(): Int {
+        val b0 = readUnsignedByte()
+        val b1 = readUnsignedByte()
+        val b2 = readUnsignedByte()
+        val b3 = readUnsignedByte()
+        return (b3 shl 24) or (b2 shl 16) or (b1 shl 8) or b0
+    }
+}

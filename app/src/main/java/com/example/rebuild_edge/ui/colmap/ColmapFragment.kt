@@ -26,6 +26,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -214,6 +215,7 @@ class ColmapFragment : Fragment() {
                     success = success,
                     taskType = TaskRecord.TYPE_COLMAP,
                     extraJson = JSONObject().apply {
+                        put("tags", JSONArray().apply { put("sfm") })
                         put("cameraModel", cameraModel)
                         put("singleCamera", singleCamera)
                         put("maxImageSize", maxImageSize)
