@@ -7,22 +7,9 @@
     <string name="nav_header_desc">Navigation header</string>
     <string name="action_settings">Settings</string>
 
-    <string name="menu_home">Home</string>
     <string name="menu_gallery">OpenCV</string>
     <string name="menu_colmap">COLMAP</string>
-    <string name="menu_slideshow">Slideshow</string>
     <string name="menu_tasks">Tasks</string>
     <string name="menu_task_detail">Task Detail</string>
 
-    <string name="home_description">Rebuild Edge combines OpenCV preprocessing, COLMAP reconstruction, and task tracking in one place.</string>
-    <string name="home_quick_actions_title">Quick actions</string>
-    <string name="home_quick_action_gallery">- OpenCV: select imagery, prep metadata, then hand the folder to COLMAP.</string>
-    <string name="home_quick_action_colmap">- COLMAP: tune reconstruction settings and watch the sparse/dense outputs.</string>
-    <string name="home_quick_action_tasks">- Tasks: review previous runs, explore logs, and validate deliverables.</string>
-
-    <string name="slideshow_description">Use this view to monitor a run: check the timer, CPU usage, and the latest logs as the pipeline executes.</string>
-    <string name="slideshow_progress_title">Run progress</string>
-    <string name="slideshow_progress_step1">- Preparation: copy the selected images into cache, pick stride/window, and enable GPS alignment.</string>
-    <string name="slideshow_progress_step2">- Execution: COLMAP and OpenCV steps stream text into the log and update elapsed time.</string>
-    <string name="slideshow_progress_step3">- Review: result folders land under the app-specific output directory for visualization.</string>
 </resources>
