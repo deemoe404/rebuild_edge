@@ -904,7 +904,7 @@ cmake -G Ninja -S "$COLMAP_SRC" -B "$COLMAP_BUILD" \
   -DSQLite3_INCLUDE_DIRS="$SQLITE_INST/include" \
   -DSQLite3_LIBRARIES="$SQLITE_INST/lib/libsqlite3.a" \
   -DCMAKE_CXX_STANDARD=17 -DCMAKE_CXX_STANDARD_REQUIRED=ON \
-  -DCMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS:-} -isystem \"$BOOST_INST/include\" -I\"$LZ4_INST/include\"" \
+  -DCMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS:-} -DFREEIMAGE_LIB -isystem \"$BOOST_INST/include\" -I\"$LZ4_INST/include\"" \
   -DCMAKE_INSTALL_PREFIX="$COLMAP_INST"
 cmake --build "$COLMAP_BUILD" --target install -j
 
