@@ -11,5 +11,6 @@
     <string name="menu_colmap">COLMAP</string>
     <string name="menu_tasks">Tasks</string>
     <string name="menu_task_detail">Task Detail</string>
+    <string name="menu_depthpro_test">DepthPro test</string>
 
 </resources>

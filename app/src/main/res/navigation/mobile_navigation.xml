@@ -28,6 +28,12 @@
     </fragment>
 
     <fragment
+        android:id="@+id/nav_depthpro"
+        android:name="com.example.rebuild_edge.ui.depthpro.DepthProTestFragment"
+        android:label="@string/menu_depthpro_test"
+        tools:layout="@layout/fragment_depthpro" />
+
+    <fragment
         android:id="@+id/nav_task_detail"
         android:name="com.example.rebuild_edge.ui.tasks.TaskDetailFragment"
         android:label="@string/menu_task_detail"

@@ -16,5 +16,9 @@
             android:id="@+id/nav_tasks"
             android:icon="@drawable/ic_menu_gallery"
             android:title="@string/menu_tasks" />
+        <item
+            android:id="@+id/nav_depthpro"
+            android:icon="@drawable/ic_menu_slideshow"
+            android:title="@string/menu_depthpro_test" />
     </group>
 </menu>
