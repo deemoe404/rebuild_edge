@@ -32,3 +32,5 @@ local.properties
 /sfmfull/src/main/jniLibs/
 
 /logs/
+/.vscode/
+/.venv/
