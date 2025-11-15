@@ -12,6 +12,22 @@
         android:textSize="14sp"
         android:textStyle="bold" />
 
+    <Button
+        android:id="@+id/btnSelectRgbFolder"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="选择 RGB 文件夹" />
+
+    <TextView
+        android:id="@+id/txtRgbFolderInfo"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="12sp"
+        android:textColor="@android:color/darker_gray"
+        android:paddingTop="4dp"
+        android:visibility="gone" />
+
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
