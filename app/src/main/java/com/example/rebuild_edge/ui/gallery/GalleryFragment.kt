@@ -112,7 +112,7 @@ class GalleryFragment : Fragment() {
                     }
                 }
             }
-            val outDir = File(requireContext().getExternalFilesDir(null), "sfm_out").apply { mkdirs() }
+            val outDir = File(requireContext().getExternalFilesDir(null), "sfm_out/${startTimeMs}").apply { mkdirs() }
             val logFile = File(outDir, "sfm_run.log")
 
             val align = binding.chkAlign.isChecked
@@ -124,14 +124,53 @@ class GalleryFragment : Fragment() {
                     val maxLongEdge = runCatching { binding.editMaxLongEdge.text.toString().trim().toInt() }
                         .getOrDefault(2000)
                         .coerceAtLeast(0)
-                    appendKotlinLog("Max long edge: $maxLongEdge px\n")
-                    SfmNative.runSfm(imagePaths.toTypedArray(), outDir.absolutePath, align, maxLongEdge)
+                    val mode = binding.spinnerMode.selectedItemPosition // 0=default,1=lite,2=kNN
+                    val stride = runCatching { binding.editStride.text.toString().trim().toInt() }.getOrDefault(1).coerceAtLeast(1)
+                    val window = runCatching { binding.editWindow.text.toString().trim().toInt() }.getOrDefault(0).coerceAtLeast(0)
+                    val kNeighbors = runCatching { binding.editKNeighbors.text.toString().trim().toInt() }.getOrDefault(2).coerceAtLeast(1)
+                    appendKotlinLog("Max long edge: $maxLongEdge px, Mode=$mode, stride=$stride, window=$window, k=$kNeighbors\n")
+                    SfmNative.runSfm(
+                        imagePaths.toTypedArray(),
+                        outDir.absolutePath,
+                        align,
+                        maxLongEdge,
+                        mode,
+                        stride,
+                        window,
+                        kNeighbors
+                    )
                 } catch (t: Throwable) {
                     Log.e(TAG, "Native SFM crashed", t)
                     "Error: ${t.message}"
                 }
             } else {
                 "Need at least 3 JPG images in the folder"
+            }
+            // Persist task record
+            runCatching {
+                val ended = System.currentTimeMillis()
+                val duration = (ended - startTimeMs).coerceAtLeast(0L)
+                val ply = File(outDir, "reconstruction_points.ply")
+                val json = File(outDir, "camera_poses.json")
+                val ok = result.contains("OK") && ply.exists() && json.exists()
+                val id = com.example.rebuild_edge.data.TaskStore.newId()
+                val rec = com.example.rebuild_edge.data.TaskRecord(
+                    id = id,
+                    startedAt = startTimeMs,
+                    durationMs = duration,
+                    outDir = outDir.absolutePath,
+                    logPath = logFile.absolutePath,
+                    inputCount = imagePaths.size,
+                    alignUsingGps = align,
+                    maxLongEdge = runCatching { binding.editMaxLongEdge.text.toString().trim().toInt() }.getOrDefault(2000).coerceAtLeast(0),
+                    mode = binding.spinnerMode.selectedItemPosition,
+                    stride = runCatching { binding.editStride.text.toString().trim().toInt() }.getOrDefault(1).coerceAtLeast(1),
+                    window = runCatching { binding.editWindow.text.toString().trim().toInt() }.getOrDefault(0).coerceAtLeast(0),
+                    kNeighbors = runCatching { binding.editKNeighbors.text.toString().trim().toInt() }.getOrDefault(2).coerceAtLeast(1),
+                    resultSummary = result.take(5000),
+                    success = ok
+                )
+                com.example.rebuild_edge.data.TaskStore.add(requireContext(), rec)
             }
             withContext(Dispatchers.Main) {
                 stopTailingLog()

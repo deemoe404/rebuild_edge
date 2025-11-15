@@ -29,6 +29,26 @@ object SfmNative {
         imagePaths: Array<String>,
         outDir: String,
         alignUsingGps: Boolean,
-        maxLongEdge: Int
+        maxLongEdge: Int,
+        mode: Int,
+        stride: Int,
+        window: Int,
+        kNeighbors: Int
+    ): String
+
+    external fun runColmapSfm(
+        datasetPath: String,
+        runDir: String,
+        imageListPath: String,
+        logPath: String,
+        cameraModel: String,
+        singleCamera: Boolean,
+        sequentialOverlap: Int,
+        maxGpsNeighborDist: Int,
+        maxImageSize: Int,
+        threads: Int,
+        alignGps: Boolean,
+        alignmentType: String,
+        alignmentMaxError: Double
     ): String
 }

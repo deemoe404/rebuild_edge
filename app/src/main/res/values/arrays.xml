@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="sfm_modes">
+        <item>Default (Full)</item>
+        <item>Sequential-lite (sampling)</item>
+        <item>Sequential k-neighbors (experimental)</item>
+    </string-array>
+    <string-array name="colmap_camera_models">
+        <item>OPENCV</item>
+        <item>SIMPLE_RADIAL</item>
+        <item>RADIAL</item>
+        <item>PINHOLE</item>
+    </string-array>
+    <string-array name="colmap_alignment_types">
+        <item>ecef</item>
+        <item>enu</item>
+        <item>enu-plane</item>
+        <item>enu-plane-unscaled</item>
+        <item>plane</item>
+    </string-array>
+</resources>

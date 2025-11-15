@@ -29,6 +29,16 @@ android {
     }
 
     buildTypes {
+        debug {
+            // 开 debug 符号（重点在这几行）
+            ndk {
+                // FULL 或 SYMBOL_TABLE 都行，先用 FULL 方便调试
+                debugSymbolLevel = "FULL"
+                // 如果 AS 提示用枚举，也可能是：
+                // debugSymbolLevel = DebugSymbolLevel.FULL
+            }
+        }
+
         release {
             isMinifyEnabled = false
             proguardFiles(

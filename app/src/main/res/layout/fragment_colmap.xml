@@ -4,7 +4,7 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    tools:context=".ui.gallery.GalleryFragment">
+    tools:context=".ui.colmap.ColmapFragment">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -13,26 +13,34 @@
         android:padding="16dp">
 
         <TextView
-            android:id="@+id/text_gallery"
+            android:id="@+id/txtIntro"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Select a folder of images with DJI XMP, then run SFM."
+            android:text="选择一个包含JPEG的文件夹，然后运行COLMAP增量SfM（仅稀疏，带GPS对齐）。"
             android:textSize="16sp" />
 
         <Button
-            android:id="@+id/btnSelect"
+            android:id="@+id/btnSelectDataset"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Select Folder" />
+            android:text="选择数据集文件夹" />
+
+        <TextView
+            android:id="@+id/txtDataset"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="4dp"
+            android:text="未选择"
+            android:textSize="14sp" />
 
         <CheckBox
-            android:id="@+id/chkAlign"
+            android:id="@+id/chkSingleCamera"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:paddingTop="8dp"
             android:checked="true"
-            android:text="Align to ENU using GPS" />
+            android:text="单相机（单一内参）" />
 
-        <!-- Mode selection -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -42,88 +50,15 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Mode:" 
+                android:text="相机模型："
                 android:textSize="14sp" />
 
             <Spinner
-                android:id="@+id/spinnerMode"
+                android:id="@+id/spinnerCameraModel"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:entries="@array/sfm_modes" />
-        </LinearLayout>
-
-        <!-- Parameters for modes -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:paddingTop="8dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Stride:" 
-                android:textSize="14sp" />
-
-            <EditText
-                android:id="@+id/editStride"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:inputType="number"
-                android:hint="1"
-                android:text="1"
-                android:maxLines="1"
-                android:ems="4" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:paddingTop="4dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Window:" 
-                android:textSize="14sp" />
-
-            <EditText
-                android:id="@+id/editWindow"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:inputType="number"
-                android:hint="0 (all)"
-                android:text="0"
-                android:maxLines="1"
-                android:ems="4" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:paddingTop="4dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="k-Neighbors:" 
-                android:textSize="14sp" />
-
-            <EditText
-                android:id="@+id/editKNeighbors"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:inputType="number"
-                android:hint="2"
-                android:text="2"
-                android:maxLines="1"
-                android:ems="4" />
+                android:entries="@array/colmap_camera_models" />
         </LinearLayout>
 
         <LinearLayout
@@ -135,27 +70,142 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Max long edge (px):"
+                android:text="Max图像边(px)："
                 android:textSize="14sp" />
 
             <EditText
-                android:id="@+id/editMaxLongEdge"
+                android:id="@+id/editMaxImageSize"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
+                android:ems="6"
                 android:inputType="number"
-                android:hint="2000"
-                android:text="2000"
-                android:maxLines="1"
-                android:ems="8" />
+                android:text="4000" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:paddingTop="4dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="序列Overlap："
+                android:textSize="14sp" />
+
+            <EditText
+                android:id="@+id/editSequentialOverlap"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:ems="4"
+                android:inputType="number"
+                android:text="8" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:paddingTop="4dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="GPS邻域(m)："
+                android:textSize="14sp" />
+
+            <EditText
+                android:id="@+id/editGpsDistance"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:ems="4"
+                android:inputType="number"
+                android:text="120" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:paddingTop="4dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="线程数："
+                android:textSize="14sp" />
+
+            <EditText
+                android:id="@+id/editThreads"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:ems="4"
+                android:inputType="number"
+                android:text="4" />
+        </LinearLayout>
+
+        <CheckBox
+            android:id="@+id/chkAlignGps"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingTop="8dp"
+            android:checked="true"
+            android:text="GPS对齐 (--align_gps)" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:paddingTop="4dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="对齐坐标系："
+                android:textSize="14sp" />
+
+            <Spinner
+                android:id="@+id/spinnerAlignmentType"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:entries="@array/colmap_alignment_types" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:paddingTop="4dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="对齐允许误差(m)："
+                android:textSize="14sp" />
+
+            <EditText
+                android:id="@+id/editAlignmentError"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:ems="4"
+                android:inputType="numberDecimal"
+                android:text="20" />
         </LinearLayout>
 
         <Button
-            android:id="@+id/btnRun"
+            android:id="@+id/btnRunColmap"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
             android:enabled="false"
-            android:text="Run SFM" />
+            android:text="运行 COLMAP" />
 
         <TextView
             android:id="@+id/txtElapsed"
@@ -176,13 +226,22 @@
             android:typeface="monospace" />
 
         <TextView
+            android:id="@+id/txtRam"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="4dp"
+            android:text="RAM: --"
+            android:textSize="12sp"
+            android:typeface="monospace" />
+
+        <TextView
             android:id="@+id/txtLog"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:paddingTop="12dp"
+            android:textSize="12sp"
             android:textIsSelectable="true"
-            android:typeface="monospace"
-            android:textSize="12sp" />
+            android:typeface="monospace" />
 
     </LinearLayout>
 </ScrollView>
