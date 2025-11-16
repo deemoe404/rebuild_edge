@@ -18,10 +18,8 @@ import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import com.example.rebuild_edge.databinding.FragmentTaskSparsePreviewBinding
 import com.example.rebuild_edge.ui.widgets.ZoomImageView
+import com.example.rebuild_edge.util.NpyReader
 import java.io.File
-import java.io.RandomAccessFile
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -121,7 +119,7 @@ class TaskSparsePreviewFragment : Fragment() {
     }
 
     private fun loadDepthBitmap(file: File): LoadedFrame {
-        val arr = NpyReader.load(file)
+        val arr = NpyReader.read(file)
         val width = arr.width
         val height = arr.height
         val floats = arr.data
@@ -383,118 +381,5 @@ class TaskSparsePreviewFragment : Fragment() {
     override fun onDestroyView() {
         super.onDestroyView()
         _binding = null
-    }
-}
-
-private object NpyReader {
-    data class Result(val width: Int, val height: Int, val data: FloatArray)
-
-    fun load(file: File): Result {
-        RandomAccessFile(file, "r").use { raf ->
-            val magic = ByteArray(6)
-            raf.readFully(magic)
-            if (!magic.contentEquals(byteArrayOf(0x93.toByte(), 'N'.code.toByte(), 'U'.code.toByte(), 'M'.code.toByte(), 'P'.code.toByte(), 'Y'.code.toByte()))) {
-                throw IllegalArgumentException("不是 NPY 文件")
-            }
-            val major = raf.readUnsignedByte()
-            raf.readUnsignedByte() // minor, unused
-            val headerLen = when (major) {
-                1 -> raf.readUnsignedShortLE()
-                2 -> raf.readIntLE()
-                else -> raf.readUnsignedShortLE()
-            }
-            val headerBytes = ByteArray(headerLen)
-            raf.readFully(headerBytes)
-            val header = String(headerBytes)
-            val shapePart = Regex("'shape'\\s*:\\s*\\(([^)]*)\\)").find(header)
-                ?: throw IllegalArgumentException("无法解析 shape: $header")
-            val dims = Regex("\\d+")
-                .findAll(shapePart.groupValues[1])
-                .map { it.value.toInt() }
-                .toList()
-            if (dims.size < 2) throw IllegalArgumentException("NPY 不是二维: ${shapePart.groupValues[1]}")
-            val height = dims[0]
-            val width = dims[1]
-            val total = dims.fold(1L) { acc, d -> acc * d }
-
-            val descr = Regex("'descr'\\s*:\\s*'([^']+)'")
-                .find(header)?.groupValues?.getOrNull(1)
-                ?: "<f4"
-            val fortranOrder = Regex("'fortran_order'\\s*:\\s*(True|False)")
-                .find(header)?.groupValues?.getOrNull(1)?.equals("True", ignoreCase = true) ?: false
-
-            val (byteOrder, typeChar, typeSize) = parseDescr(descr)
-            if (typeChar != 'f') {
-                throw IllegalArgumentException("仅支持浮点 NPY，当前 descr=$descr")
-            }
-            val dataBytes = ByteArray((total * typeSize).toInt())
-            raf.readFully(dataBytes)
-            val buffer = ByteBuffer.wrap(dataBytes).order(byteOrder)
-            val data = FloatArray((width * height))
-            when (typeSize) {
-                4 -> {
-                    val floatBuf = buffer.asFloatBuffer()
-                    val tmp = FloatArray(total.toInt())
-                    floatBuf.get(tmp)
-                    copyWithOrder(tmp, data, width, height, fortranOrder)
-                }
-                8 -> {
-                    val doubleBuf = DoubleArray(total.toInt())
-                    for (i in doubleBuf.indices) {
-                        doubleBuf[i] = buffer.double
-                    }
-                    val tmp = FloatArray(doubleBuf.size) { doubleBuf[it].toFloat() }
-                    copyWithOrder(tmp, data, width, height, fortranOrder)
-                }
-                else -> throw IllegalArgumentException("不支持的 dtype 大小: $typeSize bytes")
-            }
-            return Result(width, height, data)
-        }
-    }
-
-    private fun parseDescr(descr: String): Triple<ByteOrder, Char, Int> {
-        if (descr.length < 3) return Triple(ByteOrder.LITTLE_ENDIAN, 'f', 4)
-        val orderChar = descr[0]
-        val typeChar = descr[1]
-        val size = descr.substring(2).toIntOrNull() ?: 4
-        val byteOrder = when (orderChar) {
-            '<' -> ByteOrder.LITTLE_ENDIAN
-            '>' -> ByteOrder.BIG_ENDIAN
-            else -> ByteOrder.nativeOrder()
-        }
-        return Triple(byteOrder, typeChar, size)
-    }
-
-    private fun copyWithOrder(src: FloatArray, dst: FloatArray, width: Int, height: Int, fortran: Boolean) {
-        if (!fortran) {
-            if (src.size != dst.size) {
-                System.arraycopy(src, 0, dst, 0, minOf(src.size, dst.size))
-            } else {
-                System.arraycopy(src, 0, dst, 0, src.size)
-            }
-            return
-        }
-        var idx = 0
-        for (x in 0 until width) {
-            for (y in 0 until height) {
-                val dstIndex = y * width + x
-                dst[dstIndex] = src[idx]
-                idx += 1
-            }
-        }
-    }
-
-    private fun RandomAccessFile.readUnsignedShortLE(): Int {
-        val b0 = readUnsignedByte()
-        val b1 = readUnsignedByte()
-        return (b1 shl 8) or b0
-    }
-
-    private fun RandomAccessFile.readIntLE(): Int {
-        val b0 = readUnsignedByte()
-        val b1 = readUnsignedByte()
-        val b2 = readUnsignedByte()
-        val b3 = readUnsignedByte()
-        return (b3 shl 24) or (b2 shl 16) or (b1 shl 8) or b0
     }
 }

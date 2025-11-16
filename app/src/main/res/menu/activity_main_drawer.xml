@@ -20,5 +20,9 @@
             android:id="@+id/nav_depthpro"
             android:icon="@drawable/ic_menu_slideshow"
             android:title="@string/menu_depthpro_test" />
+        <item
+            android:id="@+id/nav_psd_midas"
+            android:icon="@drawable/ic_menu_slideshow"
+            android:title="@string/menu_psd_midas_test" />
     </group>
 </menu>
