@@ -34,6 +34,12 @@
         tools:layout="@layout/fragment_depthpro" />
 
     <fragment
+        android:id="@+id/nav_midas3_tiny"
+        android:name="com.example.rebuild_edge.ui.midas.Midas31TinyTestFragment"
+        android:label="@string/menu_midas3_tiny_test"
+        tools:layout="@layout/fragment_midas3_tiny" />
+
+    <fragment
         android:id="@+id/nav_psd_midas"
         android:name="com.example.rebuild_edge.ui.psd.PsdMidasTestFragment"
         android:label="@string/menu_psd_midas_test"
