@@ -118,7 +118,7 @@ class PsdDepthCompletionEngine(
 
     fun runMidas(rgbInput: FloatArray, inputShape: IntArray, intrinsics: FloatArray): MdeOutput {
         val session = mdeSession ?: throw IllegalStateException("MiDaS ONNX session is not loaded")
-        val rgbTensor = OnnxTensor.createTensor(environment, FloatBuffer.wrap(rgbInput), inputShape.toLongArray())
+        val rgbTensor = OnnxTensor.createTensor(environment, FloatBuffer.wrap(rgbInput), inputShape.toLongArrayCompat())
         val kTensor = OnnxTensor.createTensor(environment, FloatBuffer.wrap(intrinsics), longArrayOf(1, 3, 3))
         val inputs = linkedMapOf(
             "rgb_mde" to rgbTensor,
@@ -693,6 +693,8 @@ class PsdDepthCompletionEngine(
     private fun createTensor(data: TensorData): OnnxTensor {
         return OnnxTensor.createTensor(environment, FloatBuffer.wrap(data.data), data.toLongArray())
     }
+
+    private fun IntArray.toLongArrayCompat(): LongArray = LongArray(size) { this[it].toLong() }
 
     private fun OnnxTensor.closeSilently() {
         try {
