@@ -22,6 +22,7 @@ import com.example.rebuild_edge.databinding.FragmentPsdMidasBinding
 import com.example.rebuild_edge.ui.psd.PsdDepthCompletionEngine.TensorData
 import com.example.rebuild_edge.ui.psd.PsdNative
 import com.example.rebuild_edge.util.NpyReader
+import java.io.BufferedReader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -30,6 +31,8 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import org.json.JSONArray
+import org.json.JSONObject
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -207,11 +210,7 @@ class PsdMidasTestFragment : Fragment() {
         val rgbMde = Bitmap.createScaledBitmap(rgbBitmap, mdeW, mdeH, true)
         if (rgbBitmap !== rgbMde) rgbBitmap.recycle()
         val rgbTensor = bitmapToInputArray(rgbMde, mdeW, mdeH)
-        val intrinsics = floatArrayOf(
-            mdeW.toFloat(), 0f, mdeW / 2f,
-            0f, mdeH.toFloat(), mdeH / 2f,
-            0f, 0f, 1f
-        )
+        val intrinsics = loadIntrinsics(context, sparseUri, sparse.width, sparse.height)
         val mdeOut = eng.runMidas(rgbTensor, intArrayOf(1, 3, mdeH, mdeW), intrinsics)
         val depthMde = mdeOut.depth
         val depthUpsampled = resizeFloatArray(depthMde.data, depthMde.shape[3], depthMde.shape[2], sparse.width, sparse.height)
@@ -232,12 +231,15 @@ class PsdMidasTestFragment : Fragment() {
             adaptiveMinMax = true
         )
         val feat0Up = upsampleFeatureTo(mdeOut.path0, sparse.height, sparse.width)
-        val depthDiff = eng.dualDiffusionSimplified(
+        val depthDiff = dualDiffusionFull(
+            eng,
             feat0Up,
             ipMedian,
             aligned,
             TensorData(sparse.data, intArrayOf(1, 1, sparse.height, sparse.width)),
             intrinsics,
+            knn = 3,
+            scale = 4,
             iteration = 3
         )
         val sparseResidual = FloatArray(sparse.data.size) { i -> (sparse.data[i] - depthDiff.data[i]) }
@@ -284,6 +286,125 @@ class PsdMidasTestFragment : Fragment() {
             System.arraycopy(up, 0, out, base, up.size)
         }
         return TensorData(out, intArrayOf(1, c, targetH, targetW))
+    }
+
+    private fun dualDiffusionFull(
+        eng: PsdDepthCompletionEngine,
+        feat: TensorData,
+        ipMedian: TensorData,
+        depthPolyfit: TensorData,
+        sparse: TensorData,
+        intrinsics: FloatArray,
+        knn: Int,
+        scale: Int,
+        iteration: Int
+    ): TensorData {
+        val h = sparse.shape[2]
+        val w = sparse.shape[3]
+        val point = PsdNative.depthToPoint(depthPolyfit.data, intrinsics, 1, h, w)
+        val sparseDown = eng.sparseDownSample(sparse, scale)
+        val ipDown = eng.sparseDownSample(ipMedian, scale)
+        val pointDown = eng.depthToPoint(ipDown, intrinsics.copyOf(), scaleDown = scale)
+        val featDown = resizeFeature(feat, h / scale, w / scale)
+        val depthKnnDown = PsdNative.knnPropagate(
+            pointDown.data,
+            featDown.data,
+            ipDown.data,
+            sparseDown.data,
+            1,
+            featDown.shape[1],
+            h / scale,
+            w / scale,
+            knn,
+            sparseDown.data.size
+        )
+        val depthCspnDown = eng.cspn(
+            sparseDown,
+            TensorData(depthKnnDown, intArrayOf(1, 1, h / scale, w / scale)),
+            featDown,
+            kernel = 3,
+            iteration = iteration
+        )
+        val depthUp = resizeFloatArray(depthCspnDown.data, w / scale, h / scale, w, h)
+        val featUp = resizeFeature(feat, h, w)
+        return eng.cspn(
+            sparse,
+            TensorData(depthUp, intArrayOf(1, 1, h, w)),
+            featUp,
+            kernel = 3,
+            iteration = iteration
+        )
+    }
+
+    private fun resizeFeature(src: TensorData, targetH: Int, targetW: Int): TensorData {
+        val c = src.shape[1]
+        val h = src.shape[2]
+        val w = src.shape[3]
+        val out = FloatArray(c * targetH * targetW)
+        for (ci in 0 until c) {
+            val channel = FloatArray(h * w) { idx -> src.data[ci * h * w + idx] }
+            val up = resizeFloatArray(channel, w, h, targetW, targetH)
+            val base = ci * targetH * targetW
+            System.arraycopy(up, 0, out, base, up.size)
+        }
+        return TensorData(out, intArrayOf(1, c, targetH, targetW))
+    }
+
+    private fun loadIntrinsics(context: Context, sparseUri: Uri, targetW: Int, targetH: Int): FloatArray {
+        val camFile = findCameraFile(context, sparseUri)
+        if (camFile != null && camFile.exists()) {
+            runCatching {
+                val model = loadCameraModel(camFile)
+                val srcW = max((model.cx * 2.0).toInt(), 1)
+                val srcH = max((model.cy * 2.0).toInt(), 1)
+                val sx = targetW.toFloat() / srcW.toFloat()
+                val sy = targetH.toFloat() / srcH.toFloat()
+                return floatArrayOf(
+                    (model.fx * sx).toFloat(), 0f, (model.cx * sx).toFloat(),
+                    0f, (model.fy * sy).toFloat(), (model.cy * sy).toFloat(),
+                    0f, 0f, 1f
+                )
+            }.onFailure {
+                Log.w(TAG, "Failed to load camera_poses.json, fallback to default", it)
+            }
+        }
+        return floatArrayOf(
+            targetW.toFloat(), 0f, targetW / 2f,
+            0f, targetH.toFloat(), targetH / 2f,
+            0f, 0f, 1f
+        )
+    }
+
+    private fun findCameraFile(context: Context, sparseUri: Uri): File? {
+        val path = sparseUri.path ?: return null
+        val file = if (path.startsWith("/")) File(path) else null
+        val bases = mutableListOf<File>()
+        file?.parentFile?.let { bases += it }
+        file?.parentFile?.parentFile?.let { bases += it }
+        val resolver = context.contentResolver
+        if (file == null || !file.exists()) {
+            // try copy to temp and inspect parent
+            return null
+        }
+        bases.forEach { base ->
+            val candidate = File(base, "camera_poses.json")
+            if (candidate.exists()) return candidate
+        }
+        return null
+    }
+
+    private data class CameraModel(val fx: Double, val fy: Double, val cx: Double, val cy: Double)
+
+    private fun loadCameraModel(file: File): CameraModel {
+        val text = file.readText()
+        val obj = JSONObject(text)
+        val kArr = obj.optJSONArray("K") ?: throw IllegalStateException("camera_poses.json missing K")
+        if (kArr.length() < 6) throw IllegalStateException("K array too short")
+        val fx = kArr.optDouble(0)
+        val fy = kArr.optDouble(4)
+        val cx = kArr.optDouble(2)
+        val cy = kArr.optDouble(5)
+        return CameraModel(fx, fy, cx, cy)
     }
 
     private fun loadBitmap(context: Context, uri: Uri): Bitmap {

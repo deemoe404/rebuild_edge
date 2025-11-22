@@ -120,10 +120,24 @@ class PsdDepthCompletionEngine(
         val session = mdeSession ?: throw IllegalStateException("MiDaS ONNX session is not loaded")
         val rgbTensor = OnnxTensor.createTensor(environment, FloatBuffer.wrap(rgbInput), inputShape.toLongArrayCompat())
         val kTensor = OnnxTensor.createTensor(environment, FloatBuffer.wrap(intrinsics), longArrayOf(1, 3, 3))
-        val inputs = linkedMapOf(
-            "rgb_mde" to rgbTensor,
-            "intrinsics" to kTensor
-        )
+        val names = session.inputNames.toList()
+        val inputs: Map<String, OnnxTensor> = when (names.size) {
+            1 -> mapOf(names[0] to rgbTensor) // legacy single-input export
+            2 -> {
+                // Prefer semantic names if present
+                val map = mutableMapOf<String, OnnxTensor>()
+                val rgbName = names.find { it.contains("rgb", ignoreCase = true) } ?: names[0]
+                val kName = names.find { it.contains("intrinsics", ignoreCase = true) || it.contains("k", ignoreCase = true) }
+                    ?: names.getOrNull(1)
+                    ?: names[0]
+                map[rgbName] = rgbTensor
+                if (kName != rgbName) {
+                    map[kName] = kTensor
+                }
+                map
+            }
+            else -> throw IllegalStateException("Unexpected MiDaS input count: ${names.size}")
+        }
         try {
             session.run(inputs).use { result ->
                 val depth = tensorFrom(result[0] as OnnxTensor)
@@ -134,13 +148,8 @@ class PsdDepthCompletionEngine(
                 return MdeOutput(depth, path0, path1, path2, path3)
             }
         } finally {
-            inputs.values.forEach {
-                try {
-                    it.close()
-                } catch (err: Throwable) {
-                    Log.w(TAG, "Failed to close input tensor", err)
-                }
-            }
+            try { rgbTensor.close() } catch (_: Throwable) {}
+            try { kTensor.close() } catch (_: Throwable) {}
         }
     }
 
@@ -463,15 +472,15 @@ class PsdDepthCompletionEngine(
         Convert depth to point cloud (pinhole camera). K is a 3x3 row-major array.
         Returns TensorData shaped [B,3,H,W].
      */
-    fun depthToPoint(depth: TensorData, intrinsics: FloatArray): TensorData {
+    fun depthToPoint(depth: TensorData, intrinsics: FloatArray, scaleDown: Int = 1): TensorData {
         val b = depth.shape[0]
         val h = depth.shape[2]
         val w = depth.shape[3]
         require(intrinsics.size == 9) { "intrinsics must be 3x3 row-major" }
-        val fx = intrinsics[0]
-        val fy = intrinsics[4]
-        val cx = intrinsics[2]
-        val cy = intrinsics[5]
+        val fx = intrinsics[0] / scaleDown
+        val fy = intrinsics[4] / scaleDown
+        val cx = intrinsics[2] / scaleDown
+        val cy = intrinsics[5] / scaleDown
         val out = FloatArray(b * 3 * h * w)
         var offsetDepth = 0
         var offsetOut = 0
