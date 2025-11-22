@@ -1,8 +1,5 @@
 package com.example.rebuild_edge.ui.psd
 
-import ai.onnxruntime.OnnxTensor
-import ai.onnxruntime.OrtEnvironment
-import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -18,9 +15,12 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.FileProvider
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import com.example.rebuild_edge.databinding.FragmentPsdMidasBinding
+import com.example.rebuild_edge.ui.psd.PsdDepthCompletionEngine.TensorData
+import com.example.rebuild_edge.ui.psd.PsdNative
 import com.example.rebuild_edge.util.NpyReader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -28,7 +28,8 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
-import java.nio.FloatBuffer
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -37,54 +38,54 @@ class PsdMidasTestFragment : Fragment() {
 
     private var _binding: FragmentPsdMidasBinding? = null
     private val binding get() = _binding!!
-    private val ortEnvironment by lazy { OrtEnvironment.getEnvironment() }
-    private var modelSession: OrtSession? = null
+
+    private var engine: PsdDepthCompletionEngine? = null
+    private var modelBundle: PsdDepthCompletionEngine.ModelBundle? = null
+    private var meta: PsdDepthCompletionEngine.ModelMetadata? = null
     private var selectedImageUri: Uri? = null
     private var selectedSparseUri: Uri? = null
-    private var cachedModelFile: File? = null
+    private var latestDepth: FloatArray? = null
+    private var latestWidth: Int = 0
+    private var latestHeight: Int = 0
+    private var latestRawFile: File? = null
 
     private val pickImageLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri == null) return@registerForActivityResult
-        requireActivity().contentResolver.takePersistableUriPermission(
-            uri,
-            Intent.FLAG_GRANT_READ_URI_PERMISSION
-        )
+        uri ?: return@registerForActivityResult
+        requireActivity().contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         selectedImageUri = uri
-        binding.txtSelectedImage.text = "Selected RGB: ${getDisplayName(uri)}"
+        binding.txtSelectedImage.text = "RGB: ${getDisplayName(uri)}"
     }
 
     private val pickSparseLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri == null) return@registerForActivityResult
-        requireActivity().contentResolver.takePersistableUriPermission(
-            uri,
-            Intent.FLAG_GRANT_READ_URI_PERMISSION
-        )
+        uri ?: return@registerForActivityResult
+        requireActivity().contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         selectedSparseUri = uri
-        binding.txtSelectedSparse.text = "Selected sparse depth: ${getDisplayName(uri)}"
-        binding.txtSparseStats.text = "Sparse depth: pending (run inference to inspect)"
+        binding.txtSelectedSparse.text = "Sparse depth: ${getDisplayName(uri)}"
+        binding.txtSparseStats.text = "Sparse depth: pending"
     }
 
-    private val pickModelLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri == null) return@registerForActivityResult
+    private val pickModelsLauncher = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNullOrEmpty()) return@registerForActivityResult
         val ctx = context ?: return@registerForActivityResult
-        ctx.contentResolver.takePersistableUriPermission(
-            uri,
-            Intent.FLAG_GRANT_READ_URI_PERMISSION
-        )
-        binding.txtStatus.text = "Copying PSD model..."
         viewLifecycleOwner.lifecycleScope.launch {
+            binding.txtStatus.text = "Copying model files..."
             val result = runCatching {
-                withContext(Dispatchers.IO) {
-                    copyModelFile(ctx, uri)
-                }
+                withContext(Dispatchers.IO) { copyModels(ctx, uris) }
             }
-            result.onSuccess {
-                binding.txtStatus.text = "Updated model: ${it.name}"
+            result.onSuccess { (bundle, metadata, names) ->
+                modelBundle = bundle
+                meta = metadata
+                engine?.close()
+                engine = null
+                binding.txtModelPath.text = "Models: $names"
+                binding.txtMeta.text = "Meta: ${metadata.dataset} rgb=${metadata.rgbWidth}x${metadata.rgbHeight} mde=${metadata.mdeWidth}x${metadata.mdeHeight} bins=${metadata.binCount}"
+                binding.txtStatus.text = "Models ready"
+                binding.editWidth.setText(metadata.mdeWidth.toString())
+                binding.editHeight.setText(metadata.mdeHeight.toString())
             }.onFailure {
-                Log.e(TAG, "model copy failed", it)
+                Log.e(TAG, "copy models failed", it)
                 binding.txtStatus.text = "Model copy failed: ${it.localizedMessage ?: it::class.simpleName}"
             }
-            refreshModelHint()
         }
     }
 
@@ -102,176 +103,187 @@ class PsdMidasTestFragment : Fragment() {
         binding.btnSelectImage.setOnClickListener { pickImageLauncher.launch(arrayOf("image/*")) }
         binding.btnSelectSparse.setOnClickListener { pickSparseLauncher.launch(arrayOf("*/*")) }
         binding.btnSelectModel.setOnClickListener {
-            pickModelLauncher.launch(arrayOf("application/octet-stream", "application/onnx", "*/*"))
+            pickModelsLauncher.launch(arrayOf("application/onnx", "application/octet-stream", "application/json", "*/*"))
         }
         binding.btnRunInference.setOnClickListener { runInference() }
-        refreshModelHint()
+        binding.btnExportDepth.setOnClickListener { shareDepth() }
     }
 
     override fun onDestroyView() {
-        super.onDestroyView()
-        modelSession?.close()
-        modelSession = null
-        ortEnvironment.close()
+        engine?.close()
+        engine = null
         _binding = null
+        super.onDestroyView()
     }
 
     private fun runInference() {
         val imageUri = selectedImageUri
         val sparseUri = selectedSparseUri
+        val bundle = modelBundle
+        val metadata = meta
         val ctx = context ?: return
+        if (bundle == null || metadata == null) {
+            binding.txtStatus.text = "Select ONNX (mde/res/head) + meta.json first."
+            return
+        }
         if (imageUri == null) {
-            binding.txtStatus.text = "Select an RGB image before running inference."
+            binding.txtStatus.text = "Select an RGB image."
             return
         }
         if (sparseUri == null) {
-            binding.txtStatus.text = "Select a sparse depth .npy file before running inference."
+            binding.txtStatus.text = "Select a sparse depth .npy file."
             return
         }
-        val width = binding.editWidth.text.toString().toIntOrNull()?.coerceAtLeast(1)
-        val height = binding.editHeight.text.toString().toIntOrNull()?.coerceAtLeast(1)
-        if (width == null || height == null) {
-            binding.txtStatus.text = "Enter positive numbers for width/height."
-            return
-        }
-        if (locateModelFile() == null) {
-            binding.txtStatus.text = "PSD model missing; select a .onnx file first."
-            return
-        }
-        val align = binding.switchAlign.isChecked
+        binding.btnRunInference.isEnabled = false
+        binding.txtStatus.text = "Running PSD..."
         val startWall = SystemClock.elapsedRealtime()
         val startCpu = Process.getElapsedCpuTime()
         val memBefore = usedMemory()
 
-        binding.btnRunInference.isEnabled = false
-        binding.txtStatus.text = "Running PSD MiDaS inference..."
-
         viewLifecycleOwner.lifecycleScope.launch {
-            val result = try {
+            val result = runCatching {
                 withContext(Dispatchers.IO) {
-                    runModel(ctx.applicationContext, imageUri, sparseUri, width, height, align)
+                    runPipeline(ctx, bundle, metadata, imageUri, sparseUri)
                 }
-            } catch (e: Throwable) {
-                Log.e(TAG, "PSD MiDaS inference failed", e)
-                binding.txtStatus.text = "Error: ${e.localizedMessage ?: e::class.simpleName}"
-                binding.btnRunInference.isEnabled = true
-                return@launch
             }
-
-            val elapsed = SystemClock.elapsedRealtime() - startWall
-            val cpuElapsed = Process.getElapsedCpuTime() - startCpu
-            val memAfter = usedMemory()
-
-            binding.txtElapsed.text = "Elapsed: ${elapsed} ms"
-            binding.txtCpu.text = "CPU (ms): $cpuElapsed"
-            binding.txtMemory.text =
-                "Memory: ${formatBytes(memAfter)} (${formatDelta(memAfter - memBefore)})"
-            binding.txtDepthRange.text = "Depth range (${result.depthWidth}x${result.depthHeight}): min=${formatDepth(result.minDepth)}, max=${formatDepth(result.maxDepth)}"
-            val sparse = result.sparseStats
-            binding.txtSparseStats.text = "Sparse depth (${sparse.width}x${sparse.height}): points=${sparse.validCount}, range=${formatDepth(sparse.minDepth)}~${formatDepth(sparse.maxDepth)}"
-            binding.imgPreview.setImageBitmap(result.preview)
-            binding.imgPreview.visibility = View.VISIBLE
-            val readySuffix = when {
-                result.aligned && result.alignmentNote.isNullOrEmpty() -> "aligned"
-                result.aligned -> "aligned (${result.alignmentNote})"
-                result.alignmentNote.isNullOrEmpty() -> "raw depth (unaligned)"
-                else -> "raw depth (${result.alignmentNote})"
+            result.onSuccess { (preview, statsText, depthArr, w, h) ->
+                latestDepth = depthArr
+                latestWidth = w
+                latestHeight = h
+                latestRawFile = null
+                val elapsed = SystemClock.elapsedRealtime() - startWall
+                val cpuElapsed = Process.getElapsedCpuTime() - startCpu
+                val memAfter = usedMemory()
+                binding.imgPreview.setImageBitmap(preview)
+                binding.imgPreview.visibility = View.VISIBLE
+                binding.txtSparseStats.text = statsText
+                binding.txtElapsed.text = "Elapsed: ${elapsed} ms"
+                binding.txtCpu.text = "CPU (ms): $cpuElapsed"
+                binding.txtMemory.text = "Memory: ${formatBytes(memAfter)} (${formatDelta(memAfter - memBefore)})"
+                val depthRange = computeDepthRange(depthArr)
+                binding.txtDepthRange.text = "Depth range ($w x $h): ${formatDepth(depthRange.first)} ~ ${formatDepth(depthRange.second)}"
+                binding.txtStatus.text = "Done"
+            }.onFailure {
+                Log.e(TAG, "PSD pipeline failed", it)
+                binding.txtStatus.text = "Error: ${it.localizedMessage ?: it::class.simpleName}"
             }
-            binding.txtStatus.text = "PSD MiDaS ready · $readySuffix"
             binding.btnRunInference.isEnabled = true
         }
     }
 
-    private suspend fun runModel(
-        appContext: Context,
-        imageUri: Uri,
-        sparseUri: Uri,
-        width: Int,
-        height: Int,
-        alignWithSparse: Boolean
-    ): InferenceResult {
-        val session = modelSession ?: createSession() ?: throw IllegalStateException("Model file not found. See the hint above.")
-        val rgbBitmap = loadBitmap(appContext, imageUri)
-        val scaled = Bitmap.createScaledBitmap(rgbBitmap, width, height, true)
-        if (rgbBitmap !== scaled) {
-            rgbBitmap.recycle()
-        }
-        val inputData = bitmapToInputArray(scaled, width, height)
-        val shape = longArrayOf(1L, 3L, height.toLong(), width.toLong())
-        val inputName = session.inputNames.firstOrNull() ?: throw IllegalStateException("Model input missing")
-        val sparse = loadSparseDepth(appContext, sparseUri)
-        val inputTensor = OnnxTensor.createTensor(ortEnvironment, FloatBuffer.wrap(inputData), shape)
-        val rawDepth: FloatArray
-        val outputWidth: Int
-        val outputHeight: Int
-        inputTensor.use { tensorInput ->
-            session.run(mapOf(inputName to tensorInput)).use { outputs ->
-                val depthTensor = outputs[0] as? OnnxTensor
-                    ?: throw IllegalStateException("PSD MiDaS did not return a tensor")
-                depthTensor.use { tensor ->
-                    val buffer = tensor.floatBuffer
-                    buffer.rewind()
-                    val arr = FloatArray(buffer.remaining())
-                    buffer.get(arr)
-                    val dims = resolveSpatialDims(tensor.info?.shape, width, height, arr.size)
-                    outputWidth = dims.first
-                    outputHeight = dims.second
-                    if (outputWidth * outputHeight != arr.size) {
-                        throw IllegalStateException("Unexpected ONNX output shape: ${arr.size} values cannot be reshaped into ${outputWidth}x${outputHeight}.")
-                    }
-                    rawDepth = arr
-                }
-            }
-        }
-        val resized = resizeFloatArray(rawDepth, outputWidth, outputHeight, sparse.width, sparse.height)
-        val alignment = if (alignWithSparse) alignInverseDepth(resized, sparse) else AlignmentResult(
-            depth = resized,
-            aligned = false,
-            note = "Alignment disabled"
-        )
-        val preview = depthToBitmap(alignment.depth, sparse.width, sparse.height)
-        val (minDepth, maxDepth) = computeDepthRange(alignment.depth)
-        return InferenceResult(
-            preview = preview,
-            minDepth = minDepth,
-            maxDepth = maxDepth,
-            depthWidth = sparse.width,
-            depthHeight = sparse.height,
-            sparseStats = sparse,
-            aligned = alignment.aligned,
-            alignmentNote = alignment.note
-        )
-    }
-
-    private fun createSession(): OrtSession? {
-        val modelFile = locateModelFile() ?: return null
-        return ortEnvironment.createSession(modelFile.absolutePath, OrtSession.SessionOptions()).also {
-            modelSession = it
-        }
-    }
-
-    private fun locateModelFile(): File? {
-        cachedModelFile?.takeIf { it.exists() }?.let { return it }
-        val ctx = context ?: return null
-        val external = ctx.getExternalFilesDir("checkpoints")
-        val candidates = listOfNotNull(
-            external?.let { File(it, MODEL_NAME) },
-            File(ctx.filesDir, MODEL_NAME)
-        )
-        return candidates.firstOrNull { it.exists() }?.also { cachedModelFile = it }
-    }
-
-    private fun refreshModelHint() {
+    private fun shareDepth() {
         val ctx = context ?: return
-        val externalDir = ctx.getExternalFilesDir("checkpoints") ?: ctx.filesDir
-        val expected = File(externalDir, MODEL_NAME)
-        val fallback = File(ctx.filesDir, MODEL_NAME)
-        val found = cachedModelFile?.takeIf { it.exists() }
-            ?: expected.takeIf { it.exists() }
-            ?: fallback.takeIf { it.exists() }
-        val display = found ?: expected
-        val status = if (found != null) "ready" else "missing"
-        binding.txtModelPath.text = "Model file: ${display.absolutePath} ($status)"
+        val depth = latestDepth ?: run {
+            binding.txtStatus.text = "Run inference first."
+            return
+        }
+        val w = latestWidth
+        val h = latestHeight
+        val file = latestRawFile ?: writeDepthRaw(ctx, depth, w, h).also { latestRawFile = it }
+        val uri = FileProvider.getUriForFile(ctx, ctx.packageName + ".fileprovider", file)
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "application/octet-stream"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        startActivity(Intent.createChooser(intent, "Share depth"))
+    }
+
+    private fun runPipeline(
+        context: Context,
+        bundle: PsdDepthCompletionEngine.ModelBundle,
+        metadata: PsdDepthCompletionEngine.ModelMetadata,
+        imageUri: Uri,
+        sparseUri: Uri
+    ): PipelineResult {
+        val eng = engine ?: PsdDepthCompletionEngine().also { engine = it }.apply {
+            loadModels(bundle, metadata)
+        }
+
+        val sparse = loadSparseDepth(context, sparseUri)
+        val rgbBitmap = loadBitmap(context, imageUri)
+        val mdeW = metadata.mdeWidth
+        val mdeH = metadata.mdeHeight
+        val rgbMde = Bitmap.createScaledBitmap(rgbBitmap, mdeW, mdeH, true)
+        if (rgbBitmap !== rgbMde) rgbBitmap.recycle()
+        val rgbTensor = bitmapToInputArray(rgbMde, mdeW, mdeH)
+        val intrinsics = floatArrayOf(
+            mdeW.toFloat(), 0f, mdeW / 2f,
+            0f, mdeH.toFloat(), mdeH / 2f,
+            0f, 0f, 1f
+        )
+        val mdeOut = eng.runMidas(rgbTensor, intArrayOf(1, 3, mdeH, mdeW), intrinsics)
+        val depthMde = mdeOut.depth
+        val depthUpsampled = resizeFloatArray(depthMde.data, depthMde.shape[3], depthMde.shape[2], sparse.width, sparse.height)
+        val depthInv = FloatArray(depthUpsampled.size) { idx -> 1f / max(depthUpsampled[idx], 1e-6f) }
+        val aligned = eng.alignInverseDepthPolyfit(
+            TensorData(depthInv, intArrayOf(1, 1, sparse.height, sparse.width)),
+            TensorData(sparse.data, intArrayOf(1, 1, sparse.height, sparse.width)),
+            minDepth = 0.05f,
+            maxDepth = 200f,
+            adaptiveMinMax = true
+        )
+        val ipFilled = PsdNative.fillSparseFast(sparse.data, 1, sparse.height, sparse.width, 4)
+        val ipMedian = eng.alignDepthMedian(
+            TensorData(ipFilled, intArrayOf(1, 1, sparse.height, sparse.width)),
+            TensorData(sparse.data, intArrayOf(1, 1, sparse.height, sparse.width)),
+            minDepth = sparse.minDepth.coerceAtLeast(0.05f),
+            maxDepth = sparse.maxDepth.coerceAtLeast(sparse.minDepth + 1e-4f),
+            adaptiveMinMax = true
+        )
+        val feat0Up = upsampleFeatureTo(mdeOut.path0, sparse.height, sparse.width)
+        val depthDiff = eng.dualDiffusionSimplified(
+            feat0Up,
+            ipMedian,
+            aligned,
+            TensorData(sparse.data, intArrayOf(1, 1, sparse.height, sparse.width)),
+            intrinsics,
+            iteration = 3
+        )
+        val sparseResidual = FloatArray(sparse.data.size) { i -> (sparse.data[i] - depthDiff.data[i]) }
+        val residualOut = eng.runResidualBranch(
+            TensorData(sparse.data, intArrayOf(1, 1, sparse.height, sparse.width)),
+            depthDiff,
+            TensorData(sparseResidual, intArrayOf(1, 1, sparse.height, sparse.width)),
+            arrayOf(mdeOut.path0, mdeOut.path1, mdeOut.path2, mdeOut.path3)
+        )
+        val depthResidual = FloatArray(depthDiff.data.size) { i -> depthDiff.data[i] + residualOut.residual.data[i] }
+        val bins = eng.computeBins(
+            TensorData(residualOut.residual.data, residualOut.residual.shape),
+            residualOut.confidence
+        )
+        val laplace = eng.computeLaplace(
+            TensorData(sparseResidual, intArrayOf(1, 1, sparse.height, sparse.width)),
+            TensorData(sparse.data, intArrayOf(1, 1, sparse.height, sparse.width)),
+            bins
+        )
+        val headOut = eng.runHead(
+            TensorData(sparse.data, intArrayOf(1, 1, sparse.height, sparse.width)),
+            TensorData(depthResidual, intArrayOf(1, 1, sparse.height, sparse.width)),
+            TensorData(sparseResidual, intArrayOf(1, 1, sparse.height, sparse.width)),
+            laplace,
+            residualOut.confidence,
+            arrayOf(mdeOut.path0, mdeOut.path1, mdeOut.path2, mdeOut.path3),
+            bins
+        )
+        val depthFinal = headOut.depthPix.data
+        val preview = depthToBitmap(depthFinal, sparse.width, sparse.height)
+        val sparseStats = "Sparse depth (${sparse.width}x${sparse.height}): points=${sparse.validCount}, range=${formatDepth(sparse.minDepth)}~${formatDepth(sparse.maxDepth)}"
+        return PipelineResult(preview, sparseStats, depthFinal, sparse.width, sparse.height)
+    }
+
+    private fun upsampleFeatureTo(src: TensorData, targetH: Int, targetW: Int): TensorData {
+        val c = src.shape[1]
+        val h = src.shape[2]
+        val w = src.shape[3]
+        val out = FloatArray(c * targetH * targetW)
+        for (ci in 0 until c) {
+            val channel = FloatArray(h * w) { idx -> src.data[ci * h * w + idx] }
+            val up = resizeFloatArray(channel, w, h, targetW, targetH)
+            val base = ci * targetH * targetW
+            System.arraycopy(up, 0, out, base, up.size)
+        }
+        return TensorData(out, intArrayOf(1, c, targetH, targetW))
     }
 
     private fun loadBitmap(context: Context, uri: Uri): Bitmap {
@@ -293,6 +305,7 @@ class PsdMidasTestFragment : Fragment() {
             val r = ((pixel shr 16) and 0xFF) / 255f
             val g = ((pixel shr 8) and 0xFF) / 255f
             val b = (pixel and 0xFF) / 255f
+            // cfg_swin2_tiny uses mean/std = 0.5
             result[i] = (r - 0.5f) / 0.5f
             result[i + area] = (g - 0.5f) / 0.5f
             result[i + area * 2] = (b - 0.5f) / 0.5f
@@ -323,12 +336,8 @@ class PsdMidasTestFragment : Fragment() {
         dstWidth: Int,
         dstHeight: Int
     ): FloatArray {
-        if (srcWidth == dstWidth && srcHeight == dstHeight) {
-            return data.copyOf()
-        }
-        if (srcWidth <= 0 || srcHeight <= 0 || dstWidth <= 0 || dstHeight <= 0) {
-            return FloatArray(dstWidth * dstHeight)
-        }
+        if (srcWidth == dstWidth && srcHeight == dstHeight) return data.copyOf()
+        if (srcWidth <= 0 || srcHeight <= 0 || dstWidth <= 0 || dstHeight <= 0) return FloatArray(dstWidth * dstHeight)
         val output = FloatArray(dstWidth * dstHeight)
         val scaleX = if (dstWidth == 1) 0f else (srcWidth - 1).toFloat() / (dstWidth - 1).toFloat()
         val scaleY = if (dstHeight == 1) 0f else (srcHeight - 1).toFloat() / (dstHeight - 1).toFloat()
@@ -355,96 +364,13 @@ class PsdMidasTestFragment : Fragment() {
         return output
     }
 
-    private fun alignInverseDepth(prediction: FloatArray, sparse: SparseDepth): AlignmentResult {
-        if (sparse.validCount < MIN_SPARSE_SAMPLES) {
-            return AlignmentResult(
-                depth = prediction.copyOf(),
-                aligned = false,
-                note = "Not enough sparse points (${sparse.validCount})"
-            )
-        }
-        if (!sparse.minDepth.isFinite() || !sparse.maxDepth.isFinite() || sparse.maxDepth <= sparse.minDepth) {
-            return AlignmentResult(
-                depth = prediction.copyOf(),
-                aligned = false,
-                note = "Invalid sparse depth range"
-            )
-        }
-        val total = prediction.size
-        val mask = BooleanArray(total)
-        var active = 0
-        for (i in 0 until total) {
-            val depth = sparse.data[i]
-            if (depth.isFinite() && depth > 0f) {
-                mask[i] = true
-                active += 1
-            }
-        }
-        if (active < MIN_SPARSE_SAMPLES) {
-            return AlignmentResult(
-                depth = prediction.copyOf(),
-                aligned = false,
-                note = "Sparse depth has too few valid pixels ($active)"
-            )
-        }
-        val safeMin = max(sparse.minDepth.toDouble(), 1e-6)
-        val safeMax = max(sparse.maxDepth.toDouble(), safeMin + 1e-6)
-        var a00 = 0.0
-        var a01 = 0.0
-        var a11 = 0.0
-        var b0 = 0.0
-        var b1 = 0.0
-        val predictionDouble = DoubleArray(total) { prediction[it].toDouble() }
-        for (i in 0 until total) {
-            if (!mask[i]) continue
-            val depth = sparse.data[i].toDouble()
-            val clipped = depth.coerceIn(safeMin, safeMax)
-            val inv = 1.0 / max(clipped, 1e-6)
-            val pred = predictionDouble[i]
-            a00 += pred * pred
-            a01 += pred
-            a11 += 1.0
-            b0 += pred * inv
-            b1 += inv
-        }
-        if (a11 <= 0.0) {
-            return AlignmentResult(
-                depth = prediction.copyOf(),
-                aligned = false,
-                note = "Degenerate alignment system"
-            )
-        }
-        val det = (a00 * a11) - (a01 * a01)
-        if (det <= 0.0) {
-            return AlignmentResult(
-                depth = prediction.copyOf(),
-                aligned = false,
-                note = "Alignment determinant <= 0"
-            )
-        }
-        val scale = ((a11 * b0) - (a01 * b1)) / det
-        val shift = ((-a01 * b0) + (a00 * b1)) / det
-        val depth = FloatArray(total)
-        val minInverse = 1.0 / safeMax
-        val maxInverse = 1.0 / safeMin
-        for (i in 0 until total) {
-            val inv = scale * predictionDouble[i] + shift
-            val clippedInv = inv.coerceIn(minInverse, maxInverse)
-            val depthVal = (1.0 / max(clippedInv, 1e-6)).toFloat()
-            depth[i] = depthVal
-        }
-        return AlignmentResult(depth = depth, aligned = true, note = null)
-    }
-
     private fun depthToBitmap(depth: FloatArray, width: Int, height: Int): Bitmap {
         val (minDepth, maxDepth) = computeDepthRange(depth)
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val pixels = IntArray(width * height)
         val validRange = if (minDepth.isFinite() && maxDepth.isFinite() && maxDepth > minDepth) {
             maxDepth - minDepth
-        } else {
-            Float.NaN
-        }
+        } else Float.NaN
         val hsv = floatArrayOf(240f, 1f, 1f)
         for (i in depth.indices) {
             val value = depth[i]
@@ -461,35 +387,52 @@ class PsdMidasTestFragment : Fragment() {
         return bitmap
     }
 
-    private fun copyModelFile(ctx: Context, uri: Uri): File {
-        val baseDir = ctx.getExternalFilesDir("checkpoints") ?: ctx.filesDir
-        baseDir.mkdirs()
-        val dest = File(baseDir, MODEL_NAME)
-        ctx.contentResolver.openInputStream(uri)?.use { input ->
-            FileOutputStream(dest).use { output ->
-                input.copyTo(output)
+    private fun copyModels(ctx: Context, uris: List<Uri>): Triple<PsdDepthCompletionEngine.ModelBundle, PsdDepthCompletionEngine.ModelMetadata, String> {
+        val baseDir = File(ctx.filesDir, "psd_models").apply { mkdirs() }
+        var mde: File? = null
+        var residual: File? = null
+        var head: File? = null
+        var metaFile: File? = null
+        val names = mutableListOf<String>()
+        uris.forEach { uri ->
+            ctx.contentResolver.openInputStream(uri)?.use { input ->
+                val name = getDisplayName(uri)
+                val dest = File(baseDir, name)
+                FileOutputStream(dest).use { output -> input.copyTo(output) }
+                names.add(name)
+                val lower = name.lowercase()
+                when {
+                    lower.contains("mde") -> mde = dest
+                    lower.contains("res") || lower.contains("residual") -> residual = dest
+                    lower.contains("head") -> head = dest
+                    lower.endsWith(".json") || lower.contains("meta") -> metaFile = dest
+                }
             }
-        } ?: throw IllegalStateException("Could not read selected model file")
-        cachedModelFile = dest
-        modelSession?.close()
-        modelSession = null
-        return dest
+        }
+        require(mde != null && residual != null && head != null && metaFile != null) { "Need mde, residual, head ONNX and meta.json" }
+        val meta = PsdDepthCompletionEngine.ModelMetadata.fromJsonFile(metaFile!!)
+        return Triple(PsdDepthCompletionEngine.ModelBundle(mde!!, residual!!, head!!), meta, names.joinToString(", "))
+    }
+
+    private fun writeDepthRaw(ctx: Context, depth: FloatArray, width: Int, height: Int): File {
+        val file = File(ctx.cacheDir, "psd_depth_${width}x$height.bin")
+        FileOutputStream(file).channel.use { channel ->
+            val buf = ByteBuffer.allocate(8 + depth.size * 4).order(ByteOrder.LITTLE_ENDIAN)
+            buf.putInt(width)
+            buf.putInt(height)
+            depth.forEach { buf.putFloat(it) }
+            buf.flip()
+            channel.write(buf)
+        }
+        return file
     }
 
     private fun getDisplayName(uri: Uri): String {
-        val cursor = requireContext().contentResolver.query(
-            uri,
-            arrayOf(OpenableColumns.DISPLAY_NAME),
-            null,
-            null,
-            null
-        )
+        val cursor = context?.contentResolver?.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
         cursor?.use {
             if (it.moveToFirst()) {
-                val index = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                if (index >= 0) {
-                    return it.getString(index)
-                }
+                val idx = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0) return it.getString(idx)
             }
         }
         return uri.lastPathSegment ?: uri.toString()
@@ -509,61 +452,29 @@ class PsdMidasTestFragment : Fragment() {
         }
     }
 
-    private fun formatDepth(value: Float): String {
-        return if (value.isFinite()) String.format("%.3f", value) else "--"
-    }
+    private fun formatDepth(value: Float): String = if (value.isFinite()) String.format("%.3f", value) else "--"
 
     private fun formatDelta(delta: Long): String {
         val sign = if (delta >= 0) "+" else "-"
         return "$sign${formatBytes(delta)}"
     }
 
-    private fun countValidDepth(values: FloatArray): Int {
-        var count = 0
-        for (value in values) {
-            if (value.isFinite() && value > 0f) {
-                count += 1
+    private fun countValidDepth(depth: FloatArray): Int = depth.count { it.isFinite() && it > 0f }
+
+    private fun computeDepthRange(depth: FloatArray): Pair<Float, Float> {
+        var minD = Float.MAX_VALUE
+        var maxD = -Float.MAX_VALUE
+        depth.forEach { v ->
+            if (v.isFinite() && v > 0f) {
+                if (v < minD) minD = v
+                if (v > maxD) maxD = v
             }
         }
-        return count
+        if (minD == Float.MAX_VALUE || maxD == -Float.MAX_VALUE) return 0f to 0f
+        return minD to maxD
     }
 
-    private fun computeDepthRange(values: FloatArray): Pair<Float, Float> {
-        var minVal = Float.POSITIVE_INFINITY
-        var maxVal = Float.NEGATIVE_INFINITY
-        for (value in values) {
-            if (value.isFinite() && value > 0f) {
-                if (value < minVal) minVal = value
-                if (value > maxVal) maxVal = value
-            }
-        }
-        if (!minVal.isFinite() || !maxVal.isFinite()) {
-            return Float.NaN to Float.NaN
-        }
-        return minVal to maxVal
-    }
-
-    private fun resolveSpatialDims(
-        shape: LongArray?,
-        fallbackWidth: Int,
-        fallbackHeight: Int,
-        valueCount: Int
-    ): Pair<Int, Int> {
-        val dims = shape?.filter { it > 0 && it <= Int.MAX_VALUE } ?: emptyList()
-        if (dims.size >= 2) {
-            val height = dims[dims.size - 2].toInt()
-            val width = dims.last().toInt()
-            if (height > 0 && width > 0 && height.toLong() * width.toLong() == valueCount.toLong()) {
-                return width to height
-            }
-        }
-        if (fallbackWidth > 0 && fallbackHeight > 0 && fallbackWidth * fallbackHeight == valueCount) {
-            return fallbackWidth to fallbackHeight
-        }
-        return valueCount to 1
-    }
-
-    private data class SparseDepth(
+    data class SparseDepth(
         val width: Int,
         val height: Int,
         val data: FloatArray,
@@ -572,26 +483,15 @@ class PsdMidasTestFragment : Fragment() {
         val maxDepth: Float
     )
 
-    private data class AlignmentResult(
-        val depth: FloatArray,
-        val aligned: Boolean,
-        val note: String?
-    )
-
-    private data class InferenceResult(
+    data class PipelineResult(
         val preview: Bitmap,
-        val minDepth: Float,
-        val maxDepth: Float,
-        val depthWidth: Int,
-        val depthHeight: Int,
-        val sparseStats: SparseDepth,
-        val aligned: Boolean,
-        val alignmentNote: String?
+        val sparseStats: String,
+        val depth: FloatArray,
+        val width: Int,
+        val height: Int
     )
 
     companion object {
         private const val TAG = "PsdMidasTest"
-        private const val MODEL_NAME = "psd_nk_midas_swin2l.onnx"
-        private const val MIN_SPARSE_SAMPLES = 10
     }
 }
