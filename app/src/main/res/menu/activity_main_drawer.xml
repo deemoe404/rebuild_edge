@@ -28,9 +28,5 @@
             android:id="@+id/nav_psd_midas"
             android:icon="@drawable/ic_menu_slideshow"
             android:title="@string/menu_psd_midas_test" />
-        <item
-            android:id="@+id/nav_psd_midas_tiny"
-            android:icon="@drawable/ic_menu_slideshow"
-            android:title="@string/menu_psd_midas_tiny_test" />
     </group>
 </menu>
