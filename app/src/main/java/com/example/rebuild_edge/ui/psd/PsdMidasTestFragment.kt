@@ -337,13 +337,21 @@ class PsdMidasTestFragment : Fragment() {
         return TensorData(out, intArrayOf(1, c, targetH, targetW))
     }
 
-    private fun loadIntrinsics(context: Context, sparseUri: Uri, srcW: Int, srcH: Int, scale: Float, targetW: Int): FloatArray {
+    private fun loadIntrinsics(
+        context: Context,
+        sparseUri: Uri,
+        srcW: Int,
+        srcH: Int,
+        scale: Float,
+        targetW: Int,
+        targetH: Int
+    ): FloatArray {
+        val sx = if (srcW > 0) targetW.toFloat() / srcW.toFloat() else scale
+        val sy = if (srcH > 0) targetH.toFloat() / srcH.toFloat() else scale
         val camFile = findCameraFile(context, sparseUri)
         if (camFile != null && camFile.exists()) {
             runCatching {
                 val model = loadCameraModel(camFile)
-                val sx = scale
-                val sy = scale
                 return floatArrayOf(
                     (model.fx * sx).toFloat(), 0f, (model.cx * sx).toFloat(),
                     0f, (model.fy * sy).toFloat(), (model.cy * sy).toFloat(),
@@ -355,7 +363,7 @@ class PsdMidasTestFragment : Fragment() {
         }
         return floatArrayOf(
             targetW.toFloat(), 0f, targetW / 2f,
-            0f, srcH * scale, srcH * scale / 2f,
+            0f, targetH.toFloat(), targetH / 2f,
             0f, 0f, 1f
         )
     }
