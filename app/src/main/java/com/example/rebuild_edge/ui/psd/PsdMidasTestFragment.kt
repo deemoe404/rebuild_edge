@@ -230,10 +230,9 @@ class PsdMidasTestFragment : Fragment() {
             maxDepth = sparse.maxDepth.coerceAtLeast(sparse.minDepth + 1e-4f),
             adaptiveMinMax = true
         )
-        val feat0Up = upsampleFeatureTo(mdeOut.path0, sparse.height, sparse.width)
         val depthDiff = dualDiffusionFull(
             eng,
-            feat0Up,
+            mdeOut.path0,
             ipMedian,
             aligned,
             TensorData(sparse.data, intArrayOf(1, 1, sparse.height, sparse.width)),
@@ -274,20 +273,6 @@ class PsdMidasTestFragment : Fragment() {
         return PipelineResult(preview, sparseStats, depthFinal, sparse.width, sparse.height)
     }
 
-    private fun upsampleFeatureTo(src: TensorData, targetH: Int, targetW: Int): TensorData {
-        val c = src.shape[1]
-        val h = src.shape[2]
-        val w = src.shape[3]
-        val out = FloatArray(c * targetH * targetW)
-        for (ci in 0 until c) {
-            val channel = FloatArray(h * w) { idx -> src.data[ci * h * w + idx] }
-            val up = resizeFloatArray(channel, w, h, targetW, targetH)
-            val base = ci * targetH * targetW
-            System.arraycopy(up, 0, out, base, up.size)
-        }
-        return TensorData(out, intArrayOf(1, c, targetH, targetW))
-    }
-
     private fun dualDiffusionFull(
         eng: PsdDepthCompletionEngine,
         feat: TensorData,
@@ -301,10 +286,10 @@ class PsdMidasTestFragment : Fragment() {
     ): TensorData {
         val h = sparse.shape[2]
         val w = sparse.shape[3]
-        val point = PsdNative.depthToPoint(depthPolyfit.data, intrinsics, 1, h, w)
         val sparseDown = eng.sparseDownSample(sparse, scale)
         val ipDown = eng.sparseDownSample(ipMedian, scale)
-        val pointDown = eng.depthToPoint(ipDown, intrinsics.copyOf(), scaleDown = scale)
+        val depthPolyfitDown = eng.sparseDownSample(depthPolyfit, scale)
+        val pointDown = eng.depthToPoint(depthPolyfitDown, intrinsics.copyOf(), scaleDown = scale)
         val featDown = resizeFeature(feat, h / scale, w / scale)
         val depthKnnDown = PsdNative.knnPropagate(
             pointDown.data,
@@ -326,14 +311,8 @@ class PsdMidasTestFragment : Fragment() {
             iteration = iteration
         )
         val depthUp = resizeFloatArray(depthCspnDown.data, w / scale, h / scale, w, h)
-        val featUp = resizeFeature(feat, h, w)
-        return eng.cspn(
-            sparse,
-            TensorData(depthUp, intArrayOf(1, 1, h, w)),
-            featUp,
-            kernel = 3,
-            iteration = iteration
-        )
+        // Skip full-res CSPN to reduce memory
+        return TensorData(depthUp, intArrayOf(1, 1, h, w))
     }
 
     private fun resizeFeature(src: TensorData, targetH: Int, targetW: Int): TensorData {
