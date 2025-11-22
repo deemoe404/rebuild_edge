@@ -9,6 +9,10 @@ add_library(sfm_native SHARED
     native_sfm.cpp
 )
 
+add_library(psd_native SHARED
+    psd_native.cpp
+)
+
 # Use staged OpenCV headers produced by build_android_sfm_full.sh
 # This contains the installed layout (opencv4/opencv2/...) expected by includes like <opencv2/core.hpp>
 # Compute repo root from this CMakeLists.txt location to avoid brittle relative segments.
@@ -202,4 +206,10 @@ target_link_libraries(
     ${BOOST_PROGRAM_OPTIONS_LIB}
     ${LZ4_STATIC_LIB}
     ${ADDITIONAL_LINK_LIBS}
+)
+
+target_link_libraries(
+    psd_native
+    android
+    ${log-lib}
 )

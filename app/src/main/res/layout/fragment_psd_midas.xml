@@ -17,7 +17,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:paddingBottom="12dp"
-            android:text="Use PSD (MiDaS) test to run psd_nk_midas_swin2l.onnx on an image, then align the inverse depth with a sparse .npy map exported from this app. Select the RGB image, the matching sparse depth file, set the resolution, and press Run."
+            android:text="Run PSD depth completion: select three ONNX files (mde/residual/head) + meta.json, an RGB image, and a matching sparse depth (.npy). The app will run MiDaS + refinement, align with sparse depth, and export both a preview and the raw depth file."
             android:textSize="14sp" />
 
         <Button
@@ -142,7 +142,16 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="Select PSD model (.onnx)" />
+            android:text="Select models (mde/res/head) + meta.json" />
+
+        <TextView
+            android:id="@+id/txtMeta"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="4dp"
+            android:text="Meta: --"
+            android:textColor="?android:attr/textColorSecondary"
+            android:textSize="12sp" />
 
         <TextView
             android:id="@+id/txtSparseStats"
@@ -197,5 +206,12 @@
             android:text="Depth range: --"
             android:textSize="12sp"
             android:typeface="monospace" />
+
+        <Button
+            android:id="@+id/btnExportDepth"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Share raw depth" />
     </LinearLayout>
 </ScrollView>
