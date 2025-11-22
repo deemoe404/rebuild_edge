@@ -192,19 +192,25 @@ class PsdDepthCompletionEngine(
         bins: TensorData
     ): HeadOutput {
         val session = headSession ?: throw IllegalStateException("Head ONNX session is not loaded")
-        require(pathFeats.size == 4) { "Expected 4 path features, found ${pathFeats.size}" }
-        val inputs = linkedMapOf(
-            "sparse" to createTensor(sparse),
-            "depth_residual" to createTensor(depthResidual),
-            "sparse_residual" to createTensor(sparseResidual),
-            "laplace" to createTensor(laplace),
-            "confidence_residual" to createTensor(confidenceResidual),
-            "path0" to createTensor(pathFeats[0]),
-            "path1" to createTensor(pathFeats[1]),
-            "path2" to createTensor(pathFeats[2]),
-            "path3" to createTensor(pathFeats[3]),
-            "bins" to createTensor(bins)
+        val inputNames = session.inputNames.toList()
+        val known = mapOf(
+            "sparse" to { createTensor(sparse) },
+            "depth_residual" to { createTensor(depthResidual) },
+            "sparse_residual" to { createTensor(sparseResidual) },
+            "laplace" to { createTensor(laplace) },
+            "confidence_residual" to { createTensor(confidenceResidual) },
+            "path0" to { createTensor(pathFeats.getOrElse(0) { throw IllegalArgumentException("path0 missing") }) },
+            "path1" to { createTensor(pathFeats.getOrElse(1) { throw IllegalArgumentException("path1 missing") }) },
+            "path2" to { createTensor(pathFeats.getOrElse(2) { throw IllegalArgumentException("path2 missing") }) },
+            "path3" to { createTensor(pathFeats.getOrElse(3) { throw IllegalArgumentException("path3 missing") }) },
+            "bins" to { createTensor(bins) }
         )
+        val inputs = linkedMapOf<String, OnnxTensor>()
+        for (name in inputNames) {
+            val key = known.keys.firstOrNull { it.equals(name, ignoreCase = true) || name.lowercase().contains(it) }
+                ?: throw IllegalStateException("Head ONNX input '$name' not recognized")
+            inputs[name] = known.getValue(key).invoke()
+        }
         try {
             session.run(inputs).use { result ->
                 val similarity = tensorFrom(result[0] as OnnxTensor)
