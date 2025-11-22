@@ -203,14 +203,19 @@ class PsdMidasTestFragment : Fragment() {
             loadModels(bundle, metadata)
         }
 
-        val sparse = loadSparseDepth(context, sparseUri)
+        val sparseOrig = loadSparseDepth(context, sparseUri)
+        val (workW, workH, scaleSparse) = computeWorkingSize(sparseOrig.width, sparseOrig.height)
+        val sparse = if (scaleSparse < 0.999f) {
+            val data = resizeFloatArray(sparseOrig.data, sparseOrig.width, sparseOrig.height, workW, workH)
+            sparseOrig.copy(width = workW, height = workH, data = data)
+        } else sparseOrig
         val rgbBitmap = loadBitmap(context, imageUri)
         val mdeW = metadata.mdeWidth
         val mdeH = metadata.mdeHeight
         val rgbMde = Bitmap.createScaledBitmap(rgbBitmap, mdeW, mdeH, true)
         if (rgbBitmap !== rgbMde) rgbBitmap.recycle()
         val rgbTensor = bitmapToInputArray(rgbMde, mdeW, mdeH)
-        val intrinsics = loadIntrinsics(context, sparseUri, sparse.width, sparse.height)
+        val intrinsics = loadIntrinsics(context, sparseUri, sparseOrig.width, sparseOrig.height, scaleSparse, sparse.width, sparse.height)
         val mdeOut = eng.runMidas(rgbTensor, intArrayOf(1, 3, mdeH, mdeW), intrinsics)
         val depthMde = mdeOut.depth
         val depthUpsampled = resizeFloatArray(depthMde.data, depthMde.shape[3], depthMde.shape[2], sparse.width, sparse.height)
@@ -267,10 +272,13 @@ class PsdMidasTestFragment : Fragment() {
             arrayOf(mdeOut.path0, mdeOut.path1, mdeOut.path2, mdeOut.path3),
             bins
         )
-        val depthFinal = headOut.depthPix.data
-        val preview = depthToBitmap(depthFinal, sparse.width, sparse.height)
-        val sparseStats = "Sparse depth (${sparse.width}x${sparse.height}): points=${sparse.validCount}, range=${formatDepth(sparse.minDepth)}~${formatDepth(sparse.maxDepth)}"
-        return PipelineResult(preview, sparseStats, depthFinal, sparse.width, sparse.height)
+        val depthWork = headOut.depthPix.data
+        val depthFinal = if (scaleSparse < 0.999f) {
+            resizeFloatArray(depthWork, sparse.width, sparse.height, sparseOrig.width, sparseOrig.height)
+        } else depthWork
+        val preview = depthToBitmap(depthFinal, sparseOrig.width, sparseOrig.height)
+        val sparseStats = "Sparse depth (${sparseOrig.width}x${sparseOrig.height} -> ${sparse.width}x${sparse.height}): points=${sparseOrig.validCount}, range=${formatDepth(sparseOrig.minDepth)}~${formatDepth(sparseOrig.maxDepth)}"
+        return PipelineResult(preview, sparseStats, depthFinal, sparseOrig.width, sparseOrig.height)
     }
 
     private fun dualDiffusionFull(
@@ -329,15 +337,13 @@ class PsdMidasTestFragment : Fragment() {
         return TensorData(out, intArrayOf(1, c, targetH, targetW))
     }
 
-    private fun loadIntrinsics(context: Context, sparseUri: Uri, targetW: Int, targetH: Int): FloatArray {
+    private fun loadIntrinsics(context: Context, sparseUri: Uri, srcW: Int, srcH: Int, scale: Float, targetW: Int): FloatArray {
         val camFile = findCameraFile(context, sparseUri)
         if (camFile != null && camFile.exists()) {
             runCatching {
                 val model = loadCameraModel(camFile)
-                val srcW = max((model.cx * 2.0).toInt(), 1)
-                val srcH = max((model.cy * 2.0).toInt(), 1)
-                val sx = targetW.toFloat() / srcW.toFloat()
-                val sy = targetH.toFloat() / srcH.toFloat()
+                val sx = scale
+                val sy = scale
                 return floatArrayOf(
                     (model.fx * sx).toFloat(), 0f, (model.cx * sx).toFloat(),
                     0f, (model.fy * sy).toFloat(), (model.cy * sy).toFloat(),
@@ -349,7 +355,7 @@ class PsdMidasTestFragment : Fragment() {
         }
         return floatArrayOf(
             targetW.toFloat(), 0f, targetW / 2f,
-            0f, targetH.toFloat(), targetH / 2f,
+            0f, srcH * scale, srcH * scale / 2f,
             0f, 0f, 1f
         )
     }
@@ -360,11 +366,6 @@ class PsdMidasTestFragment : Fragment() {
         val bases = mutableListOf<File>()
         file?.parentFile?.let { bases += it }
         file?.parentFile?.parentFile?.let { bases += it }
-        val resolver = context.contentResolver
-        if (file == null || !file.exists()) {
-            // try copy to temp and inspect parent
-            return null
-        }
         bases.forEach { base ->
             val candidate = File(base, "camera_poses.json")
             if (candidate.exists()) return candidate
@@ -436,7 +437,7 @@ class PsdMidasTestFragment : Fragment() {
         dstWidth: Int,
         dstHeight: Int
     ): FloatArray {
-        if (srcWidth == dstWidth && srcHeight == dstHeight) return data.copyOf()
+        if (srcWidth == dstWidth && srcHeight == dstHeight) return data
         if (srcWidth <= 0 || srcHeight <= 0 || dstWidth <= 0 || dstHeight <= 0) return FloatArray(dstWidth * dstHeight)
         val output = FloatArray(dstWidth * dstHeight)
         val scaleX = if (dstWidth == 1) 0f else (srcWidth - 1).toFloat() / (dstWidth - 1).toFloat()
@@ -590,6 +591,16 @@ class PsdMidasTestFragment : Fragment() {
         val width: Int,
         val height: Int
     )
+
+    private fun computeWorkingSize(origW: Int, origH: Int): Triple<Int, Int, Float> {
+        val maxEdge = 640
+        val scale = if (origW > maxEdge || origH > maxEdge) {
+            min(maxEdge.toFloat() / origW.toFloat(), maxEdge.toFloat() / origH.toFloat())
+        } else 1f
+        val workW = max(1, (origW * scale).toInt())
+        val workH = max(1, (origH * scale).toInt())
+        return Triple(workW, workH, scale)
+    }
 
     companion object {
         private const val TAG = "PsdMidasTest"
