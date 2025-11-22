@@ -47,7 +47,8 @@ class MainActivity : AppCompatActivity() {
                 R.id.nav_tasks,
                 R.id.nav_depthpro,
                 R.id.nav_midas3_tiny,
-                R.id.nav_psd_midas
+                R.id.nav_psd_midas,
+                R.id.nav_psd_midas_tiny
             ), drawerLayout
         )
         setupActionBarWithNavController(navController, appBarConfiguration)

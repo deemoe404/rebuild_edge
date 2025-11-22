@@ -46,6 +46,12 @@
         tools:layout="@layout/fragment_psd_midas" />
 
     <fragment
+        android:id="@+id/nav_psd_midas_tiny"
+        android:name="com.example.rebuild_edge.ui.psd.PsdMidasTinyTestFragment"
+        android:label="@string/menu_psd_midas_tiny_test"
+        tools:layout="@layout/fragment_psd_midas_tiny" />
+
+    <fragment
         android:id="@+id/nav_task_detail"
         android:name="com.example.rebuild_edge.ui.tasks.TaskDetailFragment"
         android:label="@string/menu_task_detail"

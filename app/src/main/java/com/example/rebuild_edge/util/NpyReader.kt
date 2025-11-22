@@ -34,6 +34,7 @@ object NpyReader {
 
         val major = buffer.get().toInt() and 0xFF
         buffer.get() // minor, unused
+        buffer.order(ByteOrder.LITTLE_ENDIAN)
         val headerLen = when (major) {
             1 -> buffer.short.toInt() and 0xFFFF
             2 -> buffer.int
