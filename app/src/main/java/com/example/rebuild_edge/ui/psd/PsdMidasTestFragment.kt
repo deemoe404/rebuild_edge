@@ -210,12 +210,25 @@ class PsdMidasTestFragment : Fragment() {
             sparseOrig.copy(width = workW, height = workH, data = data)
         } else sparseOrig
         val rgbBitmap = loadBitmap(context, imageUri)
+        val imgW = rgbBitmap.width
+        val imgH = rgbBitmap.height
         val mdeW = metadata.mdeWidth
         val mdeH = metadata.mdeHeight
         val rgbMde = Bitmap.createScaledBitmap(rgbBitmap, mdeW, mdeH, true)
         if (rgbBitmap !== rgbMde) rgbBitmap.recycle()
         val rgbTensor = bitmapToInputArray(rgbMde, mdeW, mdeH)
-        val intrinsics = loadIntrinsics(context, sparseUri, sparseOrig.width, sparseOrig.height, scaleSparse, sparse.width, sparse.height)
+        val intrinsics = loadIntrinsics(
+            context,
+            imageUri,
+            imgW,
+            imgH,
+            sparseUri,
+            sparseOrig.width,
+            sparseOrig.height,
+            scaleSparse,
+            sparse.width,
+            sparse.height
+        )
         val mdeOut = eng.runMidas(rgbTensor, intArrayOf(1, 3, mdeH, mdeW), intrinsics)
         val depthMde = mdeOut.depth
         val depthUpsampled = resizeFloatArray(depthMde.data, depthMde.shape[3], depthMde.shape[2], sparse.width, sparse.height)
@@ -339,6 +352,9 @@ class PsdMidasTestFragment : Fragment() {
 
     private fun loadIntrinsics(
         context: Context,
+        imageUri: Uri,
+        imageW: Int,
+        imageH: Int,
         sparseUri: Uri,
         srcW: Int,
         srcH: Int,
@@ -346,26 +362,26 @@ class PsdMidasTestFragment : Fragment() {
         targetW: Int,
         targetH: Int
     ): FloatArray {
-        val sx = if (srcW > 0) targetW.toFloat() / srcW.toFloat() else scale
-        val sy = if (srcH > 0) targetH.toFloat() / srcH.toFloat() else scale
+        val sxSparse = if (srcW > 0) targetW.toFloat() / srcW.toFloat() else scale
+        val sySparse = if (srcH > 0) targetH.toFloat() / srcH.toFloat() else scale
         val camFile = findCameraFile(context, sparseUri)
         if (camFile != null && camFile.exists()) {
             runCatching {
                 val model = loadCameraModel(camFile)
                 return floatArrayOf(
-                    (model.fx * sx).toFloat(), 0f, (model.cx * sx).toFloat(),
-                    0f, (model.fy * sy).toFloat(), (model.cy * sy).toFloat(),
+                    (model.fx * sxSparse).toFloat(), 0f, (model.cx * sxSparse).toFloat(),
+                    0f, (model.fy * sySparse).toFloat(), (model.cy * sySparse).toFloat(),
                     0f, 0f, 1f
                 )
             }.onFailure {
-                Log.w(TAG, "Failed to load camera_poses.json, fallback to default", it)
+                Log.w(TAG, "Failed to load camera_poses.json, will try JPEG metadata", it)
             }
         }
-        return floatArrayOf(
-            targetW.toFloat(), 0f, targetW / 2f,
-            0f, targetH.toFloat(), targetH / 2f,
-            0f, 0f, 1f
-        )
+        val kFromJpeg = loadIntrinsicsFromJpegMetadata(context, imageUri, imageW, imageH, targetW, targetH)
+        if (kFromJpeg != null) {
+            return kFromJpeg
+        }
+        throw IllegalStateException("Unable to load intrinsics from camera_poses.json or JPEG metadata")
     }
 
     private fun findCameraFile(context: Context, sparseUri: Uri): File? {
@@ -383,6 +399,8 @@ class PsdMidasTestFragment : Fragment() {
 
     private data class CameraModel(val fx: Double, val fy: Double, val cx: Double, val cy: Double)
 
+    private data class DjiIntrinsics(val fx: Double, val fy: Double, val cx: Double, val cy: Double)
+
     private fun loadCameraModel(file: File): CameraModel {
         val text = file.readText()
         val obj = JSONObject(text)
@@ -393,6 +411,118 @@ class PsdMidasTestFragment : Fragment() {
         val cx = kArr.optDouble(2)
         val cy = kArr.optDouble(5)
         return CameraModel(fx, fy, cx, cy)
+    }
+
+    private fun loadIntrinsicsFromJpegMetadata(
+        context: Context,
+        imageUri: Uri,
+        imageW: Int,
+        imageH: Int,
+        targetW: Int,
+        targetH: Int
+    ): FloatArray? {
+        val xmp = extractXmpXml(context, imageUri) ?: run {
+            Log.w(TAG, "No XMP metadata found in JPEG: $imageUri")
+            return null
+        }
+        val intr = parseDjiIntrinsicsFromXmp(xmp) ?: run {
+            Log.w(TAG, "No DJI intrinsics found in XMP")
+            return null
+        }
+        if (imageW <= 0 || imageH <= 0 || targetW <= 0 || targetH <= 0) {
+            Log.w(TAG, "Invalid image or target size for intrinsics scaling: image=${imageW}x${imageH}, target=${targetW}x${targetH}")
+            return null
+        }
+        val sx = targetW.toFloat() / imageW.toFloat()
+        val sy = targetH.toFloat() / imageH.toFloat()
+        return floatArrayOf(
+            (intr.fx * sx).toFloat(), 0f, (intr.cx * sx).toFloat(),
+            0f, (intr.fy * sy).toFloat(), (intr.cy * sy).toFloat(),
+            0f, 0f, 1f
+        )
+    }
+
+    private fun extractXmpXml(context: Context, imageUri: Uri): String? {
+        return runCatching {
+            context.contentResolver.openInputStream(imageUri)?.use { input ->
+                val bytes = input.readBytes()
+                val data = bytes.toString(Charsets.ISO_8859_1)
+                val start1 = data.indexOf("<x:xmpmeta")
+                val start2 = data.indexOf("<xmpmeta")
+                val start = when {
+                    start1 >= 0 -> start1
+                    start2 >= 0 -> start2
+                    else -> return null
+                }
+                val endTag1 = "</x:xmpmeta>"
+                val endTag2 = "</xmpmeta>"
+                var end = data.indexOf(endTag1, start)
+                if (end >= 0) {
+                    end += endTag1.length
+                } else {
+                    end = data.indexOf(endTag2, start)
+                    if (end < 0) return null
+                    end += endTag2.length
+                }
+                data.substring(start, end)
+            }
+        }.getOrElse {
+            Log.w(TAG, "Failed to extract XMP from JPEG", it)
+            null
+        }
+    }
+
+    private fun parseDjiIntrinsicsFromXmp(xmp: String): DjiIntrinsics? {
+        fun getAttr(name: String): Double? {
+            val regex = Regex("${Regex.escape(name)}=\"([^\"]+)\"")
+            val match = regex.find(xmp) ?: return null
+            return match.groupValues.getOrNull(1)?.toDoubleOrNull()
+        }
+
+        val focalCalib = getAttr("drone-dji:CalibratedFocalLength")
+        val cxAttr = getAttr("drone-dji:CalibratedOpticalCenterX")
+        val cyAttr = getAttr("drone-dji:CalibratedOpticalCenterY")
+
+        val dewarpRegex = Regex("drone-dji:DewarpData=\"([^\"]+)\"")
+        val dewarpMatch = dewarpRegex.find(xmp)
+        var fxD = 0.0
+        var fyD = 0.0
+        var dx = 0.0
+        var dy = 0.0
+        var hasDewarp = false
+        if (dewarpMatch != null) {
+            val payload = dewarpMatch.groupValues.getOrNull(1) ?: ""
+            val semi = payload.indexOf(';')
+            val nums = if (semi >= 0 && semi + 1 < payload.length) {
+                payload.substring(semi + 1)
+            } else {
+                payload
+            }
+            val values = nums.split(',').mapNotNull { it.trim().toDoubleOrNull() }
+            if (values.size >= 4) {
+                fxD = values[0]
+                fyD = values[1]
+                dx = values[2]
+                dy = values[3]
+                hasDewarp = true
+            }
+        }
+
+        val hasF = focalCalib != null
+        val hasCx = cxAttr != null
+        val hasCy = cyAttr != null
+        if (!hasF && !hasDewarp) return null
+
+        val fx = if (hasF) focalCalib!! else fxD
+        val fy = if (hasF) focalCalib!! else fyD
+        val cx = (if (hasCx) cxAttr!! else 0.0) + if (hasDewarp) dx else 0.0
+        val cy = (if (hasCy) cyAttr!! else 0.0) + if (hasDewarp) dy else 0.0
+
+        return if (fx > 0.0 && fy > 0.0 && cx > 0.0 && cy > 0.0) {
+            DjiIntrinsics(fx, fy, cx, cy)
+        } else {
+            null
+        }
     }
 
     private fun loadBitmap(context: Context, uri: Uri): Bitmap {
