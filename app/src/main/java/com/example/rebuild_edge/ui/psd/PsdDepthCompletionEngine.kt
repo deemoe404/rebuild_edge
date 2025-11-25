@@ -55,6 +55,7 @@ class PsdDepthCompletionEngine(
                     rgbWidth = obj.getInt("rgb_width"),
                     mdeHeight = obj.getInt("mde_height"),
                     mdeWidth = obj.getInt("mde_width"),
+
                     binCount = obj.getInt("bin_num"),
                     alpha1 = obj.getDouble("alpha1").toFloat(),
                     beta1 = obj.getDouble("beta1").toFloat(),
@@ -114,9 +115,11 @@ class PsdDepthCompletionEngine(
         mdeSession = environment.createSession(bundle.midas.absolutePath, OrtSession.SessionOptions())
         residualSession = environment.createSession(bundle.residual.absolutePath, OrtSession.SessionOptions())
         headSession = environment.createSession(bundle.head.absolutePath, OrtSession.SessionOptions())
+        Log.d(TAG, "Models loaded: \n  Midas: ${bundle.midas.name}\n  Res: ${bundle.residual.name}\n  Head: ${bundle.head.name}")
     }
 
     fun runMidas(rgbInput: FloatArray, inputShape: IntArray, intrinsics: FloatArray): MdeOutput {
+        Log.d(TAG, "runMidas: inputShape=${inputShape.contentToString()}")
         val session = mdeSession ?: throw IllegalStateException("MiDaS ONNX session is not loaded")
         val rgbTensor = OnnxTensor.createTensor(environment, FloatBuffer.wrap(rgbInput), inputShape.toLongArrayCompat())
         val kTensor = OnnxTensor.createTensor(environment, FloatBuffer.wrap(intrinsics), longArrayOf(1, 3, 3))
@@ -145,6 +148,7 @@ class PsdDepthCompletionEngine(
                 val path1 = tensorFrom(result[2] as OnnxTensor)
                 val path2 = tensorFrom(result[3] as OnnxTensor)
                 val path3 = tensorFrom(result[4] as OnnxTensor)
+                Log.d(TAG, "runMidas: depth=${depth.shape.contentToString()} path0=${path0.shape.contentToString()}")
                 return MdeOutput(depth, path0, path1, path2, path3)
             }
         } finally {
@@ -161,6 +165,7 @@ class PsdDepthCompletionEngine(
     ): ResidualOutput {
         val session = residualSession ?: throw IllegalStateException("Residual ONNX session is not loaded")
         require(pathFeats.size == 4) { "Expected 4 path features, found ${pathFeats.size}" }
+        Log.d(TAG, "runResidualBranch: sparse=${sparse.shape.contentToString()} depthDiff=${depthDiff.shape.contentToString()}")
 
         val inputs = linkedMapOf(
             "sparse" to createTensor(sparse),
@@ -175,6 +180,7 @@ class PsdDepthCompletionEngine(
             session.run(inputs).use { result ->
                 val residual = tensorFrom(result[0] as OnnxTensor)
                 val confidence = tensorFrom(result[1] as OnnxTensor)
+                Log.d(TAG, "runResidualBranch: residual=${residual.shape.contentToString()} conf=${confidence.shape.contentToString()}")
                 return ResidualOutput(residual, confidence)
             }
         } finally {
@@ -191,6 +197,7 @@ class PsdDepthCompletionEngine(
         pathFeats: Array<TensorData>,
         bins: TensorData
     ): HeadOutput {
+        Log.d(TAG, "runHead: sparse=${sparse.shape.contentToString()} depthRes=${depthResidual.shape.contentToString()}")
         val session = headSession ?: throw IllegalStateException("Head ONNX session is not loaded")
         val inputNames = session.inputNames.toList()
         val known = mapOf(
@@ -228,7 +235,9 @@ class PsdDepthCompletionEngine(
                     globalConf,
                     depthImg,
                     depthPix
-                )
+                ).also {
+                    Log.d(TAG, "runHead: depthPix=${it.depthPix.shape.contentToString()} globalConf=${it.globalConfidence.shape.contentToString()}")
+                }
             }
         } finally {
             inputs.values.forEach { it.closeSilently() }
@@ -236,6 +245,7 @@ class PsdDepthCompletionEngine(
     }
 
     fun computeBins(residual: TensorData, confidence: TensorData): TensorData {
+        Log.d(TAG, "computeBins: residual=${residual.shape.contentToString()}")
         val meta = metadata ?: throw IllegalStateException("Metadata not loaded")
         val batch = residual.shape[0]
         val height = residual.shape[2]
@@ -271,6 +281,7 @@ class PsdDepthCompletionEngine(
         require(sparseResidual.shape.contentEquals(sparseDepth.shape)) {
             "sparse residual shape ${sparseResidual.shape.contentToString()} must match sparse depth shape"
         }
+        Log.d(TAG, "computeLaplace: sparseRes=${sparseResidual.shape.contentToString()} bins=${bins.shape.contentToString()}")
         val batch = sparseResidual.shape[0]
         val height = sparseResidual.shape[2]
         val width = sparseResidual.shape[3]
@@ -327,6 +338,7 @@ class PsdDepthCompletionEngine(
         require(depthInverse.shape.contentEquals(targetDepth.shape)) {
             "depthInverse shape ${depthInverse.shape.contentToString()} must match target ${targetDepth.shape.contentToString()}"
         }
+        Log.d(TAG, "alignInverseDepthPolyfit: shape=${depthInverse.shape.contentToString()}")
         val b = depthInverse.shape[0]
         val h = depthInverse.shape[2]
         val w = depthInverse.shape[3]
@@ -412,6 +424,7 @@ class PsdDepthCompletionEngine(
         require(depth.shape.contentEquals(targetDepth.shape)) {
             "depth shape ${depth.shape.contentToString()} must match target ${targetDepth.shape.contentToString()}"
         }
+        Log.d(TAG, "alignDepthMedian: shape=${depth.shape.contentToString()}")
         val b = depth.shape[0]
         val h = depth.shape[2]
         val w = depth.shape[3]
@@ -558,6 +571,7 @@ class PsdDepthCompletionEngine(
         val w = dense.shape[3]
         val c = feature.shape[1]
         require(kernel == 3) { "Only 3x3 kernel supported in CPU CSPN" }
+        Log.d(TAG, "cspn: dense=${dense.shape.contentToString()} feat=${feature.shape.contentToString()} iter=$iteration")
         val out = dense.data.copyOf()
         val mask = BooleanArray(b * h * w)
         for (i in mask.indices) {
@@ -642,6 +656,7 @@ class PsdDepthCompletionEngine(
         intrinsics: FloatArray,
         iteration: Int = 3
     ): TensorData {
+        Log.d(TAG, "dualDiffusionSimplified: start")
         // Downsample feature to [B,C',H,W] where C' matches feature channels
         val feat = feature
         // Use CSPN only
@@ -653,46 +668,133 @@ class PsdDepthCompletionEngine(
         Basic fill similar to ip_basic.fill_in_fast: iteratively averages valid
         neighbors to fill zeros.
      */
-    fun fillSparseDepthFast(sparse: TensorData, iterations: Int = 4): TensorData {
+    /**
+        Fast, in-place depth completion matching ip_basic.py fill_in_fast.
+        Args:
+            maxDepth: max depth value for inversion (default 100.0 in ip_basic, but we should use actual max or config)
+            extrapolate: whether to extend depths to top (default true in ip_basic)
+            blurType: "gaussian" or "bilateral" (ip_basic default is gaussian for fill_in_fast? No, default arg is 'gaussian' in fill_in_fast definition line 69)
+     */
+    fun fillInFast(
+        sparse: TensorData,
+        maxDepth: Float = 100f,
+        extrapolate: Boolean = true,
+        blurType: String = "gaussian"
+    ): TensorData {
+        Log.d(TAG, "fillInFast: sparse=${sparse.shape.contentToString()} maxDepth=$maxDepth")
         val b = sparse.shape[0]
         val h = sparse.shape[2]
         val w = sparse.shape[3]
-        val out = sparse.data.copyOf()
-        repeat(iterations) {
-            val tmp = out.copyOf()
-            var idx = 0
-            for (bi in 0 until b) {
-                for (y in 0 until h) {
-                    for (x in 0 until w) {
-                        val v = out[idx]
-                        if (v > 0f) {
-                            idx += 1
-                            continue
+        // We process each batch item independently, but for now assume B=1 or loop
+        // The primitives above (dilate etc) take flat arrays assuming single channel image.
+        // So we loop over batch.
+        val outData = FloatArray(sparse.data.size)
+        val frameSize = h * w
+
+        for (bi in 0 until b) {
+            val offset = bi * frameSize
+            // Copy current frame
+            var depthMap = sparse.data.copyOfRange(offset, offset + frameSize)
+
+            // 1. Invert
+            // valid_pixels = (depth_map > 0.1)
+            // depth_map[valid_pixels] = max_depth - depth_map[valid_pixels]
+            for (i in depthMap.indices) {
+                if (depthMap[i] > 0.1f) {
+                    depthMap[i] = maxDepth - depthMap[i]
+                }
+            }
+
+            // 2. Dilate with custom kernel (DIAMOND_5)
+            depthMap = dilate(depthMap, w, h, DIAMOND_KERNEL_5)
+
+            // 3. Hole closing (MORPH_CLOSE with FULL_5)
+            depthMap = morphologyClose(depthMap, w, h, FULL_KERNEL_5)
+
+            // 4. Fill empty spaces with dilated values
+            // empty_pixels = (depth_map < 0.1)
+            // dilated = cv2.dilate(depth_map, FULL_KERNEL_7)
+            // depth_map[empty_pixels] = dilated[empty_pixels]
+            val dilated7 = dilate(depthMap, w, h, FULL_KERNEL_7)
+            for (i in depthMap.indices) {
+                if (depthMap[i] < 0.1f) {
+                    depthMap[i] = dilated7[i]
+                }
+            }
+
+            // 5. Extend highest pixel to top of image
+            if (extrapolate) {
+                // top_row_pixels = np.argmax(depth_map > 0.1, axis=0)
+                // This finds the FIRST index where condition is true along axis 0 (rows)
+                val topRowPixels = IntArray(w)
+                val topPixelValues = FloatArray(w)
+                for (x in 0 until w) {
+                    var foundY = -1
+                    for (y in 0 until h) {
+                        if (depthMap[y * w + x] > 0.1f) {
+                            foundY = y
+                            break
                         }
-                        var sum = 0f
-                        var cnt = 0
-                        for (dy in -1..1) {
-                            for (dx in -1..1) {
-                                if (dy == 0 && dx == 0) continue
-                                val ny = y + dy
-                                val nx = x + dx
-                                if (ny !in 0 until h || nx !in 0 until w) continue
-                                val nIdx = bi * h * w + ny * w + nx
-                                val nv = out[nIdx]
-                                if (nv > 0f) {
-                                    sum += nv
-                                    cnt += 1
-                                }
-                            }
-                        }
-                        tmp[idx] = if (cnt > 0) sum / cnt else 0f
-                        idx += 1
+                    }
+                    // If not found, argmax returns 0 in numpy? Or index 0?
+                    // If all false, argmax returns 0.
+                    if (foundY == -1) foundY = 0
+                    topRowPixels[x] = foundY
+                    topPixelValues[x] = depthMap[foundY * w + x]
+                }
+
+                for (x in 0 until w) {
+                    val limit = topRowPixels[x]
+                    val `val` = topPixelValues[x]
+                    for (y in 0 until limit) {
+                        depthMap[y * w + x] = `val`
+                    }
+                }
+
+                // Large Fill
+                // empty_pixels = depth_map < 0.1
+                // dilated = cv2.dilate(depth_map, FULL_KERNEL_31)
+                // depth_map[empty_pixels] = dilated[empty_pixels]
+                val dilated31 = dilate(depthMap, w, h, FULL_KERNEL_31)
+                for (i in depthMap.indices) {
+                    if (depthMap[i] < 0.1f) {
+                        depthMap[i] = dilated31[i]
                     }
                 }
             }
-            System.arraycopy(tmp, 0, out, 0, out.size)
+
+            // 6. Median blur (5)
+            depthMap = medianBlur(depthMap, w, h, 5)
+
+            // 7. Bilateral or Gaussian blur
+            if (blurType == "gaussian") {
+                // valid_pixels = (depth_map > 0.1)
+                // blurred = cv2.GaussianBlur(depth_map, (5, 5), 0)
+                // depth_map[valid_pixels] = blurred[valid_pixels]
+                val blurred = gaussianBlur(depthMap, w, h, 5, 0f)
+                for (i in depthMap.indices) {
+                    if (depthMap[i] > 0.1f) {
+                        depthMap[i] = blurred[i]
+                    }
+                }
+            }
+            // Note: Bilateral not implemented yet, fallback to skip or gaussian if requested?
+            // ip_basic default is gaussian.
+
+            // 8. Invert
+            // valid_pixels = (depth_map > 0.1)
+            // depth_map[valid_pixels] = max_depth - depth_map[valid_pixels]
+            for (i in depthMap.indices) {
+                if (depthMap[i] > 0.1f) {
+                    depthMap[i] = maxDepth - depthMap[i]
+                }
+            }
+
+            // Copy back to output
+            System.arraycopy(depthMap, 0, outData, offset, frameSize)
         }
-        return TensorData(out, sparse.shape.copyOf())
+
+        return TensorData(outData, sparse.shape.copyOf())
     }
 
     private fun tensorFrom(tensor: OnnxTensor): TensorData {
@@ -730,5 +832,163 @@ class PsdDepthCompletionEngine(
 
     companion object {
         private const val TAG = "PsdDepthEngine"
+
+        // Kernels matching ip_basic.py
+        private val DIAMOND_KERNEL_5 = arrayOf(
+            intArrayOf(0, 0, 1, 0, 0),
+            intArrayOf(0, 1, 1, 1, 0),
+            intArrayOf(1, 1, 1, 1, 1),
+            intArrayOf(0, 1, 1, 1, 0),
+            intArrayOf(0, 0, 1, 0, 0)
+        )
+
+        private val FULL_KERNEL_5 = Array(5) { IntArray(5) { 1 } }
+        private val FULL_KERNEL_7 = Array(7) { IntArray(7) { 1 } }
+        private val FULL_KERNEL_31 = Array(31) { IntArray(31) { 1 } }
+
+        private fun dilate(data: FloatArray, w: Int, h: Int, kernel: Array<IntArray>): FloatArray {
+            val out = data.copyOf()
+            val kh = kernel.size
+            val kw = kernel[0].size
+            val kh2 = kh / 2
+            val kw2 = kw / 2
+            // Naive implementation, can be optimized
+            for (y in 0 until h) {
+                for (x in 0 until w) {
+                    var maxVal = data[y * w + x]
+                    // Optimization: only check if kernel center is 1? No, standard dilation checks all kernel 1s.
+                    // But for sparse filling, we often dilate from valid pixels.
+                    // Let's stick to standard definition: max of neighborhood where kernel is 1.
+                    for (ky in 0 until kh) {
+                        for (kx in 0 until kw) {
+                            if (kernel[ky][kx] == 1) {
+                                val ny = y + ky - kh2
+                                val nx = x + kx - kw2
+                                if (ny in 0 until h && nx in 0 until w) {
+                                    val v = data[ny * w + nx]
+                                    if (v > maxVal) maxVal = v
+                                }
+                            }
+                        }
+                    }
+                    out[y * w + x] = maxVal
+                }
+            }
+            return out
+        }
+
+        private fun erode(data: FloatArray, w: Int, h: Int, kernel: Array<IntArray>): FloatArray {
+            val out = data.copyOf()
+            val kh = kernel.size
+            val kw = kernel[0].size
+            val kh2 = kh / 2
+            val kw2 = kw / 2
+            for (y in 0 until h) {
+                for (x in 0 until w) {
+                    var minVal = data[y * w + x]
+                    for (ky in 0 until kh) {
+                        for (kx in 0 until kw) {
+                            if (kernel[ky][kx] == 1) {
+                                val ny = y + ky - kh2
+                                val nx = x + kx - kw2
+                                if (ny in 0 until h && nx in 0 until w) {
+                                    val v = data[ny * w + nx]
+                                    if (v < minVal) minVal = v
+                                }
+                            }
+                        }
+                    }
+                    out[y * w + x] = minVal
+                }
+            }
+            return out
+        }
+
+        private fun morphologyClose(data: FloatArray, w: Int, h: Int, kernel: Array<IntArray>): FloatArray {
+            val dilated = dilate(data, w, h, kernel)
+            return erode(dilated, w, h, kernel)
+        }
+
+        private fun medianBlur(data: FloatArray, w: Int, h: Int, kSize: Int): FloatArray {
+            val out = data.copyOf()
+            val k2 = kSize / 2
+            val window = FloatArray(kSize * kSize)
+            for (y in 0 until h) {
+                for (x in 0 until w) {
+                    var count = 0
+                    for (ky in -k2..k2) {
+                        for (kx in -k2..k2) {
+                            val ny = y + ky
+                            val nx = x + kx
+                            if (ny in 0 until h && nx in 0 until w) {
+                                window[count++] = data[ny * w + nx]
+                            }
+                        }
+                    }
+                    if (count > 0) {
+                        // Partial sort to find median
+                        // For small kSize (5), simple sort is fine
+                        // Optimization: only sort valid part
+                        // Even simpler: copy to list and sort
+                        // But array is faster.
+                        // Let's use a simple insertion sort or Arrays.sort on a slice
+                        // Since we reused 'window', we need to be careful.
+                        // Actually, let's just copy the valid values to a temp array
+                        val validWindow = window.copyOfRange(0, count)
+                        validWindow.sort()
+                        out[y * w + x] = validWindow[count / 2]
+                    }
+                }
+            }
+            return out
+        }
+
+        private fun gaussianBlur(data: FloatArray, w: Int, h: Int, kSize: Int = 5, sigma: Float = 0f): FloatArray {
+            // 1D Gaussian kernel generation
+            val k2 = kSize / 2
+            val sigmaVal = if (sigma > 0f) sigma else 0.3f * ((kSize - 1) * 0.5f - 1) + 0.8f
+            val kernel = FloatArray(kSize)
+            var sum = 0f
+            for (i in 0 until kSize) {
+                val x = i - k2
+                val g = exp(-(x * x) / (2 * sigmaVal * sigmaVal))
+                kernel[i] = g
+                sum += g
+            }
+            for (i in 0 until kSize) kernel[i] /= sum
+
+            // Separable convolution
+            val temp = FloatArray(data.size)
+            val out = FloatArray(data.size)
+
+            // Horizontal pass
+            for (y in 0 until h) {
+                for (x in 0 until w) {
+                    var acc = 0f
+                    for (k in -k2..k2) {
+                        val nx = x + k
+                        // Replicate border
+                        val rx = nx.coerceIn(0, w - 1)
+                        acc += data[y * w + rx] * kernel[k + k2]
+                    }
+                    temp[y * w + x] = acc
+                }
+            }
+
+            // Vertical pass
+            for (y in 0 until h) {
+                for (x in 0 until w) {
+                    var acc = 0f
+                    for (k in -k2..k2) {
+                        val ny = y + k
+                        // Replicate border
+                        val ry = ny.coerceIn(0, h - 1)
+                        acc += temp[ry * w + x] * kernel[k + k2]
+                    }
+                    out[y * w + x] = acc
+                }
+            }
+            return out
+        }
     }
 }

@@ -29,7 +29,8 @@ object PsdNative {
         batch: Int,
         height: Int,
         width: Int,
-        iterations: Int
+        iterations: Int,
+        maxDepth: Float
     ): FloatArray
 
     /**

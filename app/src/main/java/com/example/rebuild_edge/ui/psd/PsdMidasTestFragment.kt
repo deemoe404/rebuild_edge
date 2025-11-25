@@ -21,6 +21,7 @@ import androidx.lifecycle.lifecycleScope
 import com.example.rebuild_edge.databinding.FragmentPsdMidasBinding
 import com.example.rebuild_edge.ui.psd.PsdDepthCompletionEngine.TensorData
 import com.example.rebuild_edge.ui.psd.PsdNative
+import com.example.rebuild_edge.R
 import com.example.rebuild_edge.util.NpyReader
 import java.io.BufferedReader
 import kotlinx.coroutines.Dispatchers
@@ -85,6 +86,7 @@ class PsdMidasTestFragment : Fragment() {
                 binding.txtStatus.text = "Models ready"
                 binding.editWidth.setText(metadata.mdeWidth.toString())
                 binding.editHeight.setText(metadata.mdeHeight.toString())
+                applyDiffusionDefaults(metadata.dataset)
             }.onFailure {
                 Log.e(TAG, "copy models failed", it)
                 binding.txtStatus.text = "Model copy failed: ${it.localizedMessage ?: it::class.simpleName}"
@@ -125,6 +127,13 @@ class PsdMidasTestFragment : Fragment() {
         val bundle = modelBundle
         val metadata = meta
         val ctx = context ?: return
+        val enablePostProcess = binding.switchPostProcess.isChecked
+        val postIterations = binding.editPostIterations.text?.toString()?.toIntOrNull()?.coerceAtLeast(0) ?: 0
+        val diffusionMode = binding.spinnerDiffusion.selectedItem?.toString() ?: "3D-2D"
+        val diffusionKnn = binding.editKnn.text?.toString()?.toIntOrNull()?.coerceAtLeast(1) ?: 1
+        val diffusionCandidate = binding.editCandidateLimit.text?.toString()?.toIntOrNull()?.coerceAtLeast(0) ?: 0
+        val diffusionScale = binding.editDiffScale.text?.toString()?.toIntOrNull()?.coerceAtLeast(1) ?: 4
+        val diffusionIter = binding.editDiffIteration.text?.toString()?.toIntOrNull()?.coerceAtLeast(1) ?: 3
         if (bundle == null || metadata == null) {
             binding.txtStatus.text = "Select ONNX (mde/res/head) + meta.json first."
             return
@@ -139,6 +148,7 @@ class PsdMidasTestFragment : Fragment() {
         }
         binding.btnRunInference.isEnabled = false
         binding.txtStatus.text = "Running PSD..."
+        Log.d(TAG, "runInference: Start. enablePostProcess=$enablePostProcess postIterations=$postIterations")
         val startWall = SystemClock.elapsedRealtime()
         val startCpu = Process.getElapsedCpuTime()
         val memBefore = usedMemory()
@@ -146,7 +156,20 @@ class PsdMidasTestFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch {
             val result = runCatching {
                 withContext(Dispatchers.IO) {
-                    runPipeline(ctx, bundle, metadata, imageUri, sparseUri)
+                    runPipeline(
+                        ctx,
+                        bundle,
+                        metadata,
+                        imageUri,
+                        sparseUri,
+                        enablePostProcess,
+                        postIterations,
+                        diffusionMode,
+                        diffusionKnn,
+                        diffusionCandidate,
+                        diffusionScale,
+                        diffusionIter
+                    )
                 }
             }
             result.onSuccess { (preview, statsText, depthArr, w, h) ->
@@ -157,6 +180,7 @@ class PsdMidasTestFragment : Fragment() {
                 val elapsed = SystemClock.elapsedRealtime() - startWall
                 val cpuElapsed = Process.getElapsedCpuTime() - startCpu
                 val memAfter = usedMemory()
+                Log.d(TAG, "runInference: Success. Elapsed=${elapsed}ms CPU=${cpuElapsed}ms")
                 binding.imgPreview.setImageBitmap(preview)
                 binding.imgPreview.visibility = View.VISIBLE
                 binding.txtSparseStats.text = statsText
@@ -165,7 +189,11 @@ class PsdMidasTestFragment : Fragment() {
                 binding.txtMemory.text = "Memory: ${formatBytes(memAfter)} (${formatDelta(memAfter - memBefore)})"
                 val depthRange = computeDepthRange(depthArr)
                 binding.txtDepthRange.text = "Depth range ($w x $h): ${formatDepth(depthRange.first)} ~ ${formatDepth(depthRange.second)}"
-                binding.txtStatus.text = "Done"
+                binding.txtStatus.text = if (enablePostProcess && postIterations > 0) {
+                    "Done (post-process ${postIterations} iter)"
+                } else {
+                    "Done"
+                }
             }.onFailure {
                 Log.e(TAG, "PSD pipeline failed", it)
                 binding.txtStatus.text = "Error: ${it.localizedMessage ?: it::class.simpleName}"
@@ -197,11 +225,19 @@ class PsdMidasTestFragment : Fragment() {
         bundle: PsdDepthCompletionEngine.ModelBundle,
         metadata: PsdDepthCompletionEngine.ModelMetadata,
         imageUri: Uri,
-        sparseUri: Uri
+        sparseUri: Uri,
+        enablePostProcess: Boolean,
+        postIterations: Int,
+        diffusionMode: String,
+        diffusionKnn: Int,
+        diffusionCandidate: Int,
+        diffusionScale: Int,
+        diffusionIteration: Int
     ): PipelineResult {
         val eng = engine ?: PsdDepthCompletionEngine().also { engine = it }.apply {
             loadModels(bundle, metadata)
         }
+        Log.d(TAG, "runPipeline: Engine ready. Loading inputs...")
 
         val sparseOrig = loadSparseDepth(context, sparseUri)
         val (workW, workH, scaleSparse) = computeWorkingSize(sparseOrig.width, sparseOrig.height)
@@ -209,6 +245,7 @@ class PsdMidasTestFragment : Fragment() {
             val data = resizeFloatArray(sparseOrig.data, sparseOrig.width, sparseOrig.height, workW, workH)
             sparseOrig.copy(width = workW, height = workH, data = data)
         } else sparseOrig
+        Log.d(TAG, "runPipeline: Sparse loaded. Orig=${sparseOrig.width}x${sparseOrig.height} Work=${sparse.width}x${sparse.height}")
         val rgbBitmap = loadBitmap(context, imageUri)
         val imgW = rgbBitmap.width
         val imgH = rgbBitmap.height
@@ -229,25 +266,35 @@ class PsdMidasTestFragment : Fragment() {
             sparse.width,
             sparse.height
         )
+        Log.d(TAG, "runPipeline: Inputs ready. Running Midas...")
         val mdeOut = eng.runMidas(rgbTensor, intArrayOf(1, 3, mdeH, mdeW), intrinsics)
         val depthMde = mdeOut.depth
-        val depthUpsampled = resizeFloatArray(depthMde.data, depthMde.shape[3], depthMde.shape[2], sparse.width, sparse.height)
-        val depthInv = FloatArray(depthUpsampled.size) { idx -> 1f / max(depthUpsampled[idx], 1e-6f) }
+        val depthInverse = resizeFloatArray(depthMde.data, depthMde.shape[3], depthMde.shape[2], sparse.width, sparse.height)
+        val minSparse = sparse.minDepth.coerceAtLeast(1e-3f)
+        val maxSparse = sparse.maxDepth.coerceAtLeast(minSparse + 1e-3f)
         val aligned = eng.alignInverseDepthPolyfit(
-            TensorData(depthInv, intArrayOf(1, 1, sparse.height, sparse.width)),
+            TensorData(depthInverse, intArrayOf(1, 1, sparse.height, sparse.width)),
             TensorData(sparse.data, intArrayOf(1, 1, sparse.height, sparse.width)),
-            minDepth = 0.05f,
-            maxDepth = 200f,
+            minDepth = minSparse,
+            maxDepth = maxSparse,
             adaptiveMinMax = true
         )
-        val ipFilled = PsdNative.fillSparseFast(sparse.data, 1, sparse.height, sparse.width, 4)
+        val ipFilled = PsdNative.fillSparseFast(
+            sparse.data,
+            1,
+            sparse.height,
+            sparse.width,
+            1,
+            sparse.maxDepth.coerceAtLeast(100f)
+        )
         val ipMedian = eng.alignDepthMedian(
             TensorData(ipFilled, intArrayOf(1, 1, sparse.height, sparse.width)),
             TensorData(sparse.data, intArrayOf(1, 1, sparse.height, sparse.width)),
-            minDepth = sparse.minDepth.coerceAtLeast(0.05f),
-            maxDepth = sparse.maxDepth.coerceAtLeast(sparse.minDepth + 1e-4f),
+            minDepth = minSparse,
+            maxDepth = maxSparse,
             adaptiveMinMax = true
         )
+        Log.d(TAG, "runPipeline: Alignment done. Running Dual Diffusion...")
         val depthDiff = dualDiffusionFull(
             eng,
             mdeOut.path0,
@@ -255,11 +302,14 @@ class PsdMidasTestFragment : Fragment() {
             aligned,
             TensorData(sparse.data, intArrayOf(1, 1, sparse.height, sparse.width)),
             intrinsics,
-            knn = 3,
-            scale = 4,
-            iteration = 3
+            mode = diffusionMode,
+            knn = diffusionKnn,
+            candidateLimit = diffusionCandidate,
+            scale = diffusionScale,
+            iteration = diffusionIteration
         )
         val sparseResidual = FloatArray(sparse.data.size) { i -> (sparse.data[i] - depthDiff.data[i]) }
+        Log.d(TAG, "runPipeline: Dual Diffusion done. Running Residual Branch...")
         val residualOut = eng.runResidualBranch(
             TensorData(sparse.data, intArrayOf(1, 1, sparse.height, sparse.width)),
             depthDiff,
@@ -276,6 +326,7 @@ class PsdMidasTestFragment : Fragment() {
             TensorData(sparse.data, intArrayOf(1, 1, sparse.height, sparse.width)),
             bins
         )
+        Log.d(TAG, "runPipeline: Residual done. Running Head...")
         val headOut = eng.runHead(
             TensorData(sparse.data, intArrayOf(1, 1, sparse.height, sparse.width)),
             TensorData(depthResidual, intArrayOf(1, 1, sparse.height, sparse.width)),
@@ -285,12 +336,26 @@ class PsdMidasTestFragment : Fragment() {
             arrayOf(mdeOut.path0, mdeOut.path1, mdeOut.path2, mdeOut.path3),
             bins
         )
-        val depthWork = headOut.depthPix.data
+        var depthWork = headOut.depthPix.data
+        if (enablePostProcess && postIterations > 0) {
+            Log.d(TAG, "runPipeline: Head done. Running Post-Process ($postIterations iter)...")
+            val featHead = headOut.feat
+            val featFull = resizeFeature3D(featHead, 32, sparse.height, sparse.width)
+            val refined = eng.cspn(
+                TensorData(sparse.data, intArrayOf(1, 1, sparse.height, sparse.width)),
+                TensorData(depthWork, intArrayOf(1, 1, sparse.height, sparse.width)),
+                featFull,
+                kernel = 3,
+                iteration = postIterations
+            )
+            depthWork = refined.data
+        }
         val depthFinal = if (scaleSparse < 0.999f) {
             resizeFloatArray(depthWork, sparse.width, sparse.height, sparseOrig.width, sparseOrig.height)
         } else depthWork
         val preview = depthToBitmap(depthFinal, sparseOrig.width, sparseOrig.height)
         val sparseStats = "Sparse depth (${sparseOrig.width}x${sparseOrig.height} -> ${sparse.width}x${sparse.height}): points=${sparseOrig.validCount}, range=${formatDepth(sparseOrig.minDepth)}~${formatDepth(sparseOrig.maxDepth)}"
+        Log.d(TAG, "runPipeline: Finished.")
         return PipelineResult(preview, sparseStats, depthFinal, sparseOrig.width, sparseOrig.height)
     }
 
@@ -301,54 +366,205 @@ class PsdMidasTestFragment : Fragment() {
         depthPolyfit: TensorData,
         sparse: TensorData,
         intrinsics: FloatArray,
+        mode: String,
         knn: Int,
+        candidateLimit: Int,
         scale: Int,
         iteration: Int
     ): TensorData {
         val h = sparse.shape[2]
         val w = sparse.shape[3]
+        val outH = max(1, h / scale)
+        val outW = max(1, w / scale)
+
         val sparseDown = eng.sparseDownSample(sparse, scale)
-        val ipDown = eng.sparseDownSample(ipMedian, scale)
-        val depthPolyfitDown = eng.sparseDownSample(depthPolyfit, scale)
+        val ipDownData = resizeFloatArray(ipMedian.data, w, h, outW, outH)
+        val ipDown = TensorData(ipDownData, intArrayOf(1, 1, outH, outW))
+        val depthPolyfitDownData = resizeFloatArray(depthPolyfit.data, w, h, outW, outH)
+        val depthPolyfitDown = TensorData(depthPolyfitDownData, intArrayOf(1, 1, outH, outW))
         val pointDown = eng.depthToPoint(depthPolyfitDown, intrinsics.copyOf(), scaleDown = scale)
-        val featDown = resizeFeature(feat, h / scale, w / scale)
-        val depthKnnDown = PsdNative.knnPropagate(
-            pointDown.data,
-            featDown.data,
-            ipDown.data,
-            sparseDown.data,
-            1,
-            featDown.shape[1],
-            h / scale,
-            w / scale,
-            knn,
-            sparseDown.data.size
-        )
-        val depthCspnDown = eng.cspn(
-            sparseDown,
-            TensorData(depthKnnDown, intArrayOf(1, 1, h / scale, w / scale)),
-            featDown,
-            kernel = 3,
-            iteration = iteration
-        )
-        val depthUp = resizeFloatArray(depthCspnDown.data, w / scale, h / scale, w, h)
-        // Skip full-res CSPN to reduce memory
-        return TensorData(depthUp, intArrayOf(1, 1, h, w))
+
+        val featDown = resizeFeature3D(feat, 9, outH, outW)
+        val featFull = resizeFeature3D(feat, 16, h, w)
+        val costFeatDown = concatPointAndFeat(pointDown, featDown)
+
+        fun knnStep(depthSeed: TensorData, sparseSrc: TensorData, point: TensorData, featSrc: TensorData, hh: Int, ww: Int): TensorData {
+            val depthKnn = PsdNative.knnPropagate(
+                point.data,
+                featSrc.data,
+                depthSeed.data,
+                sparseSrc.data,
+                1,
+                featSrc.shape[1],
+                hh,
+                ww,
+                knn,
+                candidateLimit
+            )
+            return TensorData(depthKnn, intArrayOf(1, 1, hh, ww))
+        }
+
+        // 3D-2D path (default)
+        val depth3d2d: TensorData = run {
+            val depthKnnDown = knnStep(ipDown, sparseDown, pointDown, costFeatDown, outH, outW)
+            val depthCspnDown = eng.cspn(
+                sparseDown,
+                depthKnnDown,
+                costFeatDown,
+                kernel = 3,
+                iteration = iteration
+            )
+            val depthUpData = resizeFloatArray(depthCspnDown.data, outW, outH, w, h)
+            val depthUp = TensorData(depthUpData, intArrayOf(1, 1, h, w))
+            eng.cspn(
+                sparse,
+                depthUp,
+                featFull,
+                kernel = 3,
+                iteration = iteration
+            )
+        }
+
+        return when (mode.uppercase()) {
+            "3D+2D" -> {
+                val depthKnnDown = knnStep(ipDown, sparseDown, pointDown, costFeatDown, outH, outW)
+                val depthCspn2dDown = eng.cspn(
+                    sparseDown,
+                    ipDown,
+                    costFeatDown,
+                    kernel = 3,
+                    iteration = iteration
+                )
+                val depthCspn2dUp = TensorData(
+                    resizeFloatArray(depthCspn2dDown.data, outW, outH, w, h),
+                    intArrayOf(1, 1, h, w)
+                )
+                val depthCspnFull = eng.cspn(
+                    sparse,
+                    depthCspn2dUp,
+                    featFull,
+                    kernel = 3,
+                    iteration = iteration
+                )
+                val depthKnnUp = TensorData(
+                    resizeFloatArray(depthKnnDown.data, outW, outH, w, h),
+                    intArrayOf(1, 1, h, w)
+                )
+                val mixed = FloatArray(depthCspnFull.data.size) { idx ->
+                    (depthCspnFull.data[idx] + depthKnnUp.data[idx]) * 0.5f
+                }
+                TensorData(mixed, depthCspnFull.shape)
+            }
+            "2D-3D" -> {
+                val depthCspn2dDown = eng.cspn(
+                    sparseDown,
+                    ipDown,
+                    costFeatDown,
+                    kernel = 3,
+                    iteration = iteration
+                )
+                val depthCspn2dUp = TensorData(
+                    resizeFloatArray(depthCspn2dDown.data, outW, outH, w, h),
+                    intArrayOf(1, 1, h, w)
+                )
+                val depthCspnFull = eng.cspn(
+                    sparse,
+                    depthCspn2dUp,
+                    featFull,
+                    kernel = 3,
+                    iteration = iteration
+                )
+                val depthCspn2dDownAgain = TensorData(
+                    resizeFloatArray(depthCspnFull.data, w, h, outW, outH),
+                    intArrayOf(1, 1, outH, outW)
+                )
+                val depthKnnDown = knnStep(depthCspn2dDownAgain, sparseDown, pointDown, costFeatDown, outH, outW)
+                TensorData(
+                    resizeFloatArray(depthKnnDown.data, outW, outH, w, h),
+                    intArrayOf(1, 1, h, w)
+                )
+            }
+            else -> depth3d2d
+        }
     }
 
-    private fun resizeFeature(src: TensorData, targetH: Int, targetW: Int): TensorData {
-        val c = src.shape[1]
-        val h = src.shape[2]
-        val w = src.shape[3]
-        val out = FloatArray(c * targetH * targetW)
-        for (ci in 0 until c) {
-            val channel = FloatArray(h * w) { idx -> src.data[ci * h * w + idx] }
-            val up = resizeFloatArray(channel, w, h, targetW, targetH)
-            val base = ci * targetH * targetW
-            System.arraycopy(up, 0, out, base, up.size)
-        }
-        return TensorData(out, intArrayOf(1, c, targetH, targetW))
+    private fun concatPointAndFeat(point: TensorData, feat: TensorData): TensorData {
+        val b = point.shape[0]
+        val cPoint = point.shape[1]
+        val cFeat = feat.shape[1]
+        val h = point.shape[2]
+        val w = point.shape[3]
+        val out = FloatArray(point.data.size + feat.data.size)
+        System.arraycopy(point.data, 0, out, 0, point.data.size)
+        System.arraycopy(feat.data, 0, out, point.data.size, feat.data.size)
+        return TensorData(out, intArrayOf(b, cPoint + cFeat, h, w))
     }
+
+private fun resizeFeature3D(src: TensorData, targetC: Int, targetH: Int, targetW: Int): TensorData {
+    val srcC = src.shape[1]
+    val srcH = src.shape[2]
+    val srcW = src.shape[3]
+    val out = FloatArray(targetC * targetH * targetW)
+
+    // Trilinear interpolation
+    // We map target coordinates (tc, th, tw) to source coordinates (sc, sh, sw)
+    // sc = tc * (srcC / targetC) etc.
+    // But for align_corners=False (default in PyTorch interpolate), the formula is:
+    // src_idx = target_idx * (src_size / target_size)
+
+    val scaleC = srcC.toFloat() / targetC
+    val scaleH = srcH.toFloat() / targetH
+    val scaleW = srcW.toFloat() / targetW
+
+    for (tc in 0 until targetC) {
+        val sc = (tc + 0.5f) * scaleC - 0.5f
+        val c0 = Math.floor(sc.toDouble()).toInt().coerceIn(0, srcC - 1)
+        val c1 = (c0 + 1).coerceIn(0, srcC - 1)
+        val dc = sc - Math.floor(sc.toDouble()).toFloat()
+
+        for (th in 0 until targetH) {
+            val sh = (th + 0.5f) * scaleH - 0.5f
+            val h0 = Math.floor(sh.toDouble()).toInt().coerceIn(0, srcH - 1)
+            val h1 = (h0 + 1).coerceIn(0, srcH - 1)
+            val dh = sh - Math.floor(sh.toDouble()).toFloat()
+
+            for (tw in 0 until targetW) {
+                val sw = (tw + 0.5f) * scaleW - 0.5f
+                val w0 = Math.floor(sw.toDouble()).toInt().coerceIn(0, srcW - 1)
+                val w1 = (w0 + 1).coerceIn(0, srcW - 1)
+                val dw = sw - Math.floor(sw.toDouble()).toFloat()
+
+                // 8 corners
+                // c0
+                val v000 = src.data[c0 * srcH * srcW + h0 * srcW + w0]
+                val v001 = src.data[c0 * srcH * srcW + h0 * srcW + w1]
+                val v010 = src.data[c0 * srcH * srcW + h1 * srcW + w0]
+                val v011 = src.data[c0 * srcH * srcW + h1 * srcW + w1]
+                // c1
+                val v100 = src.data[c1 * srcH * srcW + h0 * srcW + w0]
+                val v101 = src.data[c1 * srcH * srcW + h0 * srcW + w1]
+                val v110 = src.data[c1 * srcH * srcW + h1 * srcW + w0]
+                val v111 = src.data[c1 * srcH * srcW + h1 * srcW + w1]
+
+                // Interpolate along W
+                val c0h0 = v000 * (1 - dw) + v001 * dw
+                val c0h1 = v010 * (1 - dw) + v011 * dw
+                val c1h0 = v100 * (1 - dw) + v101 * dw
+                val c1h1 = v110 * (1 - dw) + v111 * dw
+
+                // Interpolate along H
+                val c0_val = c0h0 * (1 - dh) + c0h1 * dh
+                val c1_val = c1h0 * (1 - dh) + c1h1 * dh
+
+                // Interpolate along C
+                val value = c0_val * (1 - dc) + c1_val * dc
+
+                out[tc * targetH * targetW + th * targetW + tw] = value
+            }
+        }
+    }
+    return TensorData(out, intArrayOf(1, targetC, targetH, targetW))
+}
 
     private fun loadIntrinsics(
         context: Context,
@@ -578,18 +794,18 @@ class PsdMidasTestFragment : Fragment() {
         if (srcWidth == dstWidth && srcHeight == dstHeight) return data
         if (srcWidth <= 0 || srcHeight <= 0 || dstWidth <= 0 || dstHeight <= 0) return FloatArray(dstWidth * dstHeight)
         val output = FloatArray(dstWidth * dstHeight)
-        val scaleX = if (dstWidth == 1) 0f else (srcWidth - 1).toFloat() / (dstWidth - 1).toFloat()
-        val scaleY = if (dstHeight == 1) 0f else (srcHeight - 1).toFloat() / (dstHeight - 1).toFloat()
+        val scaleX = srcWidth.toFloat() / dstWidth.toFloat()
+        val scaleY = srcHeight.toFloat() / dstHeight.toFloat()
         for (y in 0 until dstHeight) {
-            val srcY = min(scaleY * y, (srcHeight - 1).toFloat())
-            val y0 = srcY.toInt().coerceIn(0, srcHeight - 1)
-            val y1 = min(y0 + 1, srcHeight - 1)
-            val yLerp = srcY - y0
+            val srcY = (y + 0.5f) * scaleY - 0.5f
+            val y0 = Math.floor(srcY.toDouble()).toInt().coerceIn(0, srcHeight - 1)
+            val y1 = (y0 + 1).coerceIn(0, srcHeight - 1)
+            val yLerp = srcY - Math.floor(srcY.toDouble()).toFloat()
             for (x in 0 until dstWidth) {
-                val srcX = min(scaleX * x, (srcWidth - 1).toFloat())
-                val x0 = srcX.toInt().coerceIn(0, srcWidth - 1)
-                val x1 = min(x0 + 1, srcWidth - 1)
-                val xLerp = srcX - x0
+                val srcX = (x + 0.5f) * scaleX - 0.5f
+                val x0 = Math.floor(srcX.toDouble()).toInt().coerceIn(0, srcWidth - 1)
+                val x1 = (x0 + 1).coerceIn(0, srcWidth - 1)
+                val xLerp = srcX - Math.floor(srcX.toDouble()).toFloat()
                 val topLeft = data[y0 * srcWidth + x0]
                 val topRight = data[y0 * srcWidth + x1]
                 val bottomLeft = data[y1 * srcWidth + x0]
@@ -738,6 +954,32 @@ class PsdMidasTestFragment : Fragment() {
         val workW = max(1, (origW * scale).toInt())
         val workH = max(1, (origH * scale).toInt())
         return Triple(workW, workH, scale)
+    }
+
+    private data class DiffusionDefaults(
+        val mode: String,
+        val knn: Int,
+        val candidate: Int,
+        val scale: Int = 4,
+        val iteration: Int = 3
+    )
+
+    private fun applyDiffusionDefaults(dataset: String) {
+        val defaults = when (dataset.uppercase()) {
+            "VKITTI2" -> DiffusionDefaults("3D+2D", 3, 0)
+            "CITYSCAPE" -> DiffusionDefaults("3D-2D", 2, 0)
+            "DIMLI" -> DiffusionDefaults("3D-2D", 12, 0)
+            "TOFDC" -> DiffusionDefaults("3D-2D", 8, 0)
+            "ARGOVERSE" -> DiffusionDefaults("3D-2D", 1, 8000)
+            else -> DiffusionDefaults("3D-2D", 1, 0)
+        }
+        val modes = resources.getStringArray(R.array.psd_diffusion_modes).map { it.uppercase() }
+        val idx = modes.indexOf(defaults.mode.uppercase()).coerceAtLeast(0)
+        binding.spinnerDiffusion.setSelection(idx)
+        binding.editKnn.setText(defaults.knn.toString())
+        binding.editCandidateLimit.setText(defaults.candidate.toString())
+        binding.editDiffScale.setText(defaults.scale.toString())
+        binding.editDiffIteration.setText(defaults.iteration.toString())
     }
 
     companion object {

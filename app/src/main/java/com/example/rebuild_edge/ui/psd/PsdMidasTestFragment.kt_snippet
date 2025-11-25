@@ -1,0 +1,13 @@
+    private fun resizeFeature(src: TensorData, targetH: Int, targetW: Int): TensorData {
+        val c = src.shape[1]
+        val h = src.shape[2]
+        val w = src.shape[3]
+        val out = FloatArray(c * targetH * targetW)
+        for (ci in 0 until c) {
+            val channel = FloatArray(h * w) { idx -> src.data[ci * h * w + idx] }
+            val up = resizeFloatArray(channel, w, h, targetW, targetH)
+            val base = ci * targetH * targetW
+            System.arraycopy(up, 0, out, base, up.size)
+        }
+        return TensorData(out, intArrayOf(1, c, targetH, targetW))
+    }

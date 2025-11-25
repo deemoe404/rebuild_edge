@@ -208,8 +208,14 @@ target_link_libraries(
     ${ADDITIONAL_LINK_LIBS}
 )
 
+target_include_directories(psd_native PRIVATE
+    ${OPENCV_INCLUDE_DIR}
+)
+
 target_link_libraries(
     psd_native
     android
     ${log-lib}
+    opencv_core
+    opencv_imgproc
 )
